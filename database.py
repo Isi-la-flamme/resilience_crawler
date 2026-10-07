@@ -1,10 +1,11 @@
-import hashlib
 import json
 import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+from file_store import full_url_hash
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ class CrawlDatabase:
 
     @staticmethod
     def page_url_hash(url):
-        return hashlib.sha256(url.encode("utf-8")).hexdigest()
+        return full_url_hash(url)
 
     def enqueue(self, start_url, urls):
         with self._lock, self._connection:

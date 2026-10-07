@@ -300,8 +300,9 @@ class CrawlerTests(unittest.TestCase):
                 self.assertEqual(file_path.parent, documents_dir / "127.0.0.1")
                 self.assertEqual(file_path.name, filename)
                 self.assertTrue(file_path.is_file())
-                url_hash = filename.split("_", 1)[0]
-                self.assertEqual(len(url_hash), 64)
+                stem, hash_part = filename.rsplit("_", 1)
+                url_hash = hash_part.rsplit(".", 1)[0]
+                self.assertEqual(len(url_hash), 8)
                 self.assertTrue(all(character in "0123456789abcdef" for character in url_hash))
                 self.assertEqual(size_bytes, len(b"test document bytes"))
 
@@ -325,7 +326,7 @@ class CrawlerTests(unittest.TestCase):
             self.assertTrue(
                 image_path.is_relative_to(Path(temp_dir) / "img" / "127.0.0.1")
             )
-            self.assertRegex(image_path.name, r"^[0-9a-f]{64}\.png$")
+            self.assertRegex(image_path.name, r"^test-image_[0-9a-f]{8}\.png$")
             self.assertEqual(image_path.read_bytes(), b"\x89PNG\r\n\x1a\n")
 
     def test_workers_fetch_pages_in_parallel(self):

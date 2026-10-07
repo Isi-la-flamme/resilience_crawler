@@ -1,13 +1,12 @@
-import hashlib
 import logging
-import mimetypes
-import os
-import re
-from urllib.parse import unquote
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from file_store import FileStore, full_url_hash
+
+
 logger = logging.getLogger(__name__)
+
 
 SUPPORTED_EXTENSIONS = {
     ".pdf",
@@ -50,20 +49,12 @@ class DocumentDownloader:
         if extension is None:
             raise ValueError(f"Format de document non pris en charge : {content_type} ({url})")
 
-        site_dir = self.output_dir / site_name
-        site_dir.mkdir(parents=True, exist_ok=True)
-        url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
-        original_name = unquote(Path(urlsplit(url).path).name)
-        original_stem = Path(original_name).stem or "document"
-        safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", original_stem).strip(" ._")
-        safe_stem = (safe_stem or "document")[:100]
-        file_path = site_dir / f"{url_hash}_{safe_stem}{extension}"
-        temporary_path = file_path.with_suffix(file_path.suffix + ".part")
-        temporary_path.write_bytes(body)
-        os.replace(temporary_path, file_path)
+        site_store = FileStore(self.output_dir / site_name)
+        filename = site_store.build_name(url, extension)
+        file_path = site_store.write(filename, body)
         logger.info("DOCUMENT saved %s -> %s (%d bytes)", url, file_path, len(body))
         return {
-            "url_hash": url_hash,
+            "url_hash": full_url_hash(url),
             "site_name": site_name,
             "local_path": str(file_path),
             "filename": file_path.name,
