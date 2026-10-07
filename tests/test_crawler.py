@@ -1,0 +1,431 @@
+import json
+import tempfile
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.error import HTTPError
+
+from crawler import Crawler
+from database import CrawlDatabase
+
+
+class TestHandler(BaseHTTPRequestHandler):
+    transient_requests = 0
+    missing_get_requests = 0
+    missing_head_requests = 0
+    slow_active = 0
+    slow_max_active = 0
+    slow_lock = threading.Lock()
+
+    def do_GET(self):
+        if self.path == "/robots.txt":
+            self.respond(200, "User-agent: *\nDisallow: /private\n")
+        elif self.path == "/missing":
+            type(self).missing_get_requests += 1
+            self.respond(404, "Introuvable")
+        elif self.path == "/":
+            self.respond(
+                200,
+                '<title>Accueil   du site</title>'
+                '<a href="/next#top">Suite</a>'
+                '<a href="/private">Privé</a>'
+                '<a href="/missing">Absent</a>'
+                '<a href="http://example.org/outside">Externe</a>',
+            )
+        elif self.path == "/next":
+            self.respond(200, "<title>Page suivante</title>")
+        elif self.path == "/temporary":
+            type(self).transient_requests += 1
+            status = 503 if type(self).transient_requests == 1 else 200
+            self.respond(status, "<title>Récupérée</title>")
+        elif self.path == "/large":
+            self.respond(200, "<title>" + ("a" * 100) + "</title>")
+        elif self.path == "/queue-root":
+            self.respond(200, '<a href="/queue-a">A</a><a href="/queue-b">B</a>')
+        elif self.path == "/queue-a":
+            self.respond(200, '<a href="/queue-shared">Partagé</a>')
+        elif self.path == "/queue-b":
+            self.respond(200, '<a href="/queue-shared">Partagé</a>')
+        elif self.path == "/queue-shared":
+            self.respond(200, "<title>Unique</title>")
+        elif self.path == "/with-image":
+            self.respond(200, '<title>Avec image</title><img src="/test-image.png">')
+        elif self.path == "/structured":
+            self.respond(
+                200,
+                '<html><head><title>Article exemple</title>'
+                '<meta property="article:published_time" content="2026-10-01T12:30:00Z">'
+                '</head><body><nav>Menu ignoré</nav><main><article>'
+                '<p>Contenu ciblé de l’article.</p>'
+                '</article></main></body></html>',
+            )
+        elif self.path == "/document-links":
+            self.respond(
+                200,
+                '<a href="/files/rapport.pdf">PDF</a>'
+                '<a href="/files/rapport-final.docx">Word</a>'
+                '<a href="/files/tableau.xlsm">Excel</a>'
+                '<a href="/files/presentation.pptx">PowerPoint</a>'
+                '<a href="/files/notes.odt">OpenDocument</a>'
+                '<a href="/files/no-extension">PDF MIME</a>',
+            )
+        elif self.path.startswith("/files/"):
+            extension = Path(self.path).suffix.lower()
+            content_types = {
+                ".pdf": "application/pdf",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+                ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                ".odt": "application/vnd.oasis.opendocument.text",
+            }
+            body = b"test document bytes"
+            self.send_response(200)
+            content_type = "application/pdf" if extension == "" else content_types[extension]
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/test-image.png":
+            body = b"\x89PNG\r\n\x1a\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif self.path == "/parallel":
+            self.respond(
+                200,
+                '<a href="/slow/one">one</a>'
+                '<a href="/slow/two">two</a>'
+                '<a href="/slow/three">three</a>',
+            )
+        elif self.path == "/batch-root":
+            self.respond(200, '<a href="/fast">fast</a><a href="/slow/one">slow</a>')
+        elif self.path == "/fast":
+            self.respond(200, "<title>Fast</title>")
+        elif self.path.startswith("/slow/"):
+            with type(self).slow_lock:
+                type(self).slow_active += 1
+                type(self).slow_max_active = max(
+                    type(self).slow_max_active,
+                    type(self).slow_active,
+                )
+            time.sleep(0.1)
+            self.respond(200, "<title>Slow</title>")
+            with type(self).slow_lock:
+                type(self).slow_active -= 1
+        else:
+            self.respond(404, "Introuvable")
+
+    def do_HEAD(self):
+        if self.path == "/missing":
+            type(self).missing_head_requests += 1
+            status = 404
+        else:
+            status = 200
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def respond(self, status, body):
+        encoded = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(status)
+        self.send_header(
+            "Content-Type",
+            "text/html; charset=utf-8" if isinstance(body, str) else "application/octet-stream",
+        )
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class CrawlerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+
+    def make_crawler(self, path="/", **kwargs):
+        return Crawler(
+            self.base_url + path,
+            delay=0,
+            sleep=lambda _: None,
+            **kwargs,
+        )
+
+    def test_crawls_same_site_and_respects_robots(self):
+        TestHandler.missing_get_requests = 0
+        TestHandler.missing_head_requests = 0
+        result = self.make_crawler().crawl()
+
+        self.assertEqual([page["url"] for page in result["pages"]], [
+            self.base_url + "/",
+            self.base_url + "/next",
+        ])
+        self.assertEqual(result["pages"][0]["title"], "Accueil du site")
+        self.assertNotIn(
+            self.base_url + "/private",
+            [page["url"] for page in result["pages"]],
+        )
+        self.assertNotIn(
+            "http://example.org/outside",
+            result["pages"][0]["links"],
+        )
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(TestHandler.missing_head_requests, 1)
+        self.assertEqual(TestHandler.missing_get_requests, 0)
+
+    def test_obeys_page_limit(self):
+        result = self.make_crawler(max_pages=1).crawl()
+
+        self.assertEqual(len(result["pages"]), 1)
+
+    def test_does_not_enqueue_url_more_than_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                result = self.make_crawler(
+                    "/queue-root",
+                    database=database,
+                    workers=4,
+                ).crawl()
+                shared_count = database.queued_url_count(
+                    self.base_url + "/queue-root",
+                    self.base_url + "/queue-shared",
+                )
+
+        self.assertEqual(shared_count, 1)
+        self.assertEqual(len(result["pages"]), 4)
+
+    def test_retries_transient_server_error(self):
+        TestHandler.transient_requests = 0
+        result = self.make_crawler("/temporary", retries=1).crawl()
+
+        self.assertEqual(len(result["pages"]), 1)
+        self.assertEqual(TestHandler.transient_requests, 2)
+
+    def test_rejects_non_http_start_url(self):
+        with self.assertRaises(ValueError):
+            Crawler("file:///tmp/page.html", sleep=lambda _: None)
+
+    def test_rejects_invalid_limits(self):
+        with self.assertRaises(ValueError):
+            self.make_crawler(max_pages=0)
+
+    def test_reports_response_larger_than_limit(self):
+        result = self.make_crawler(
+            "/large",
+            max_response_bytes=40,
+        ).crawl()
+
+        self.assertFalse(result["pages"])
+        self.assertIn("limite de 40 octets", result["errors"][0]["error"])
+
+    def test_cli_output_is_json_serializable(self):
+        result = self.make_crawler(max_pages=1).crawl()
+
+        self.assertIn("pages", json.loads(json.dumps(result)))
+
+    def test_saves_pages_and_errors_to_database(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                result = self.make_crawler(database=database).crawl()
+                self.assertEqual(database.page_count(self.base_url + "/"), 2)
+
+        self.assertEqual(len(result["pages"]), 2)
+        self.assertEqual(result["errors"], [])
+
+    def test_saves_page_metadata_content_and_full_html(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                result = self.make_crawler(
+                    "/structured",
+                    database=database,
+                    crawler_name="Crawler de test",
+                ).crawl()
+                stored_page = database._connection.execute(
+                    """SELECT id, crawled_at, published_at, title, content, html, crawler_name
+                       FROM pages WHERE url=?""",
+                    (self.base_url + "/structured",),
+                ).fetchone()
+
+        page = result["pages"][0]
+        self.assertEqual(page["id"], stored_page[0])
+        self.assertTrue(stored_page[1])
+        self.assertEqual(stored_page[2], "2026-10-01T12:30:00Z")
+        self.assertEqual(stored_page[3], "Article exemple")
+        self.assertEqual(stored_page[4], "Contenu ciblé de l’article.")
+        self.assertIn("<html>", stored_page[5])
+        self.assertNotIn("Menu ignoré", stored_page[4])
+        self.assertEqual(stored_page[6], "Crawler de test")
+
+    def test_downloads_supported_documents_into_site_named_folder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "crawl.db"
+            documents_dir = Path(temp_dir) / "documents"
+            start_url = self.base_url + "/document-links"
+            with CrawlDatabase(database_path) as database:
+                result = self.make_crawler(
+                    "/document-links",
+                    database=database,
+                    documents_dir=documents_dir,
+                ).crawl()
+                rows = database._connection.execute(
+                    "SELECT url, local_path, filename, content_type, size_bytes "
+                    "FROM documents ORDER BY url"
+                ).fetchall()
+                self.assertEqual(database.summary()["documents"], 6)
+
+            self.assertEqual(len(result["pages"]), 1)
+            self.assertEqual(len(rows), 6)
+            self.assertEqual(
+                {Path(row[1]).suffix for row in rows},
+                {".pdf", ".docx", ".xlsm", ".pptx", ".odt"},
+            )
+            for _, local_path, filename, _, size_bytes in rows:
+                file_path = Path(local_path)
+                self.assertEqual(file_path.parent, documents_dir / "127.0.0.1")
+                self.assertEqual(file_path.name, filename)
+                self.assertTrue(file_path.is_file())
+                url_hash = filename.split("_", 1)[0]
+                self.assertEqual(len(url_hash), 64)
+                self.assertTrue(all(character in "0123456789abcdef" for character in url_hash))
+                self.assertEqual(size_bytes, len(b"test document bytes"))
+
+            with CrawlDatabase(database_path) as database:
+                self.assertIsNone(database.claim_next(start_url))
+
+    def test_downloads_image_into_configured_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                result = self.make_crawler(
+                    "/with-image",
+                    database=database,
+                    image_dir=Path(temp_dir) / "img",
+                    workers=2,
+                ).crawl()
+
+            page = result["pages"][0]
+            self.assertEqual(page["images"], [self.base_url + "/test-image.png"])
+            self.assertEqual(len(page["downloaded_images"]), 1)
+            image_path = Path(page["downloaded_images"][0])
+            self.assertTrue(
+                image_path.is_relative_to(Path(temp_dir) / "img" / "127.0.0.1")
+            )
+            self.assertRegex(image_path.name, r"^[0-9a-f]{64}\.png$")
+            self.assertEqual(image_path.read_bytes(), b"\x89PNG\r\n\x1a\n")
+
+    def test_workers_fetch_pages_in_parallel(self):
+        TestHandler.slow_max_active = 0
+        self.make_crawler("/parallel", workers=3).crawl()
+
+        self.assertGreaterEqual(TestHandler.slow_max_active, 2)
+
+    def test_single_collector_pings_urls_while_workers_crawl_them(self):
+        crawler = self.make_crawler("/parallel", workers=3)
+        original_ping = crawler.ping_checker.ping
+        collector_threads = []
+
+        def track_ping(url):
+            collector_threads.append(threading.current_thread().name)
+            return original_ping(url)
+
+        crawler.ping_checker.ping = track_ping
+        result = crawler.crawl()
+
+        self.assertEqual(len(result["pages"]), 4)
+        self.assertEqual(len(collector_threads), 4)
+        self.assertEqual(set(collector_threads), {"MainThread"})
+
+    def test_start_urls_share_one_worker_pool(self):
+        TestHandler.slow_max_active = 0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                crawlers = [
+                    self.make_crawler(
+                        path,
+                        database=database,
+                        workers=2,
+                    )
+                    for path in ("/parallel", "/batch-root")
+                ]
+                results = Crawler.crawl_many(crawlers)
+
+                self.assertEqual(
+                    database.page_count(self.base_url + "/parallel"),
+                    4,
+                )
+                self.assertEqual(
+                    database.page_count(self.base_url + "/batch-root"),
+                    3,
+                )
+
+        self.assertEqual([len(result["pages"]) for result in results], [4, 3])
+        self.assertGreaterEqual(TestHandler.slow_max_active, 2)
+
+    def test_flushes_completed_pages_at_configured_interval(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                original_save_pages = database.save_pages
+                flushes = []
+
+                def record_flush(start_url, page_results):
+                    flushes.append((
+                        time.monotonic(),
+                        [page["url"] for page, _ in page_results],
+                    ))
+                    return original_save_pages(start_url, page_results)
+
+                database.save_pages = record_flush
+                started_at = time.monotonic()
+                self.make_crawler(
+                    "/batch-root",
+                    database=database,
+                    workers=2,
+                    database_flush_interval=0.02,
+                ).crawl()
+
+        fast_flushes = [
+            elapsed
+            for timestamp, urls in flushes
+            if self.base_url + "/fast" in urls
+            for elapsed in [timestamp - started_at]
+        ]
+        slow_finish = next(
+            timestamp - started_at
+            for timestamp, urls in flushes
+            if self.base_url + "/slow/one" in urls
+        )
+        self.assertTrue(fast_flushes)
+        self.assertLess(fast_flushes[0], slow_finish)
+
+    def test_workers_do_not_exceed_page_limit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                result = self.make_crawler(
+                    "/parallel",
+                    workers=4,
+                    max_pages=2,
+                    database=database,
+                ).crawl()
+                saved_pages = database.page_count(self.base_url + "/parallel")
+
+        self.assertEqual(len(result["pages"]), 2)
+        self.assertEqual(saved_pages, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

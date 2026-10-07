@@ -1,0 +1,123 @@
+
+{
+  "country": "Burkina Faso",
+  "country_code": "BF",
+  "last_verified": "2026-09-10",
+  "source": {
+    "presidence": "https://www.presidencedufaso.bf/",
+    "gouvernement": "https://gouvernement.gov.bf/"
+  },
+  "sites": [
+    {
+      "name": "Présidence du Faso",
+      "url": "https://www.presidencedufaso.bf/",
+      "type": "presidence"
+    },
+    {
+      "name": "Primature du Burkina Faso",
+      "url": "https://primature.gov.bf/",
+      "type": "primature"
+    },
+    {
+      "name": "Service d'Information du Gouvernement",
+      "url": "https://gouvernement.gov.bf/",
+      "type": "gouvernement"
+    },
+    {
+      "name": "Ministère de la Guerre et de la Défense patriotique",
+      "url": "https://www.defense.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère des Serviteurs du Peuple",
+      "url": "https://www.fonction-publique.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de la Communication, de la Culture, des Arts et du Tourisme",
+      "url": "https://www.communication.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de l'Administration territoriale et de la Mobilité",
+      "url": "https://www.matd.gov.bf/accueil",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère des Affaires étrangères",
+      "url": "https://diplomatie.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de l'Économie et des Finances",
+      "url": "https://www.finances.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de la Justice et des Droits humains",
+      "url": "https://www.justice.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de l'Agriculture, de l'Eau, des Ressources animales et halieutiques",
+      "url": "https://www.agriculture.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de la Transition digitale, des Postes et des Communications électroniques",
+      "url": "https://www.mdenp.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de la Famille et de la Solidarité",
+      "url": "https://www.action-sociale.gov.bf/accueil",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de la Santé",
+      "url": "https://www.sante.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de l'Industrie, du Commerce et de l'Artisanat",
+      "url": "https://www.commerce.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de la Construction de la Patrie",
+      "url": "https://www.mhu.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de l'Énergie, des Mines et des Carrières",
+      "url": "https://www.energie-mines.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de l'Enseignement de base, de l'Alphabétisation et de la Promotion des langues nationales",
+      "url": "https://www.education.gov.bf/accueil",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de l'Enseignement secondaire et de la Formation professionnelle et technique",
+      "url": "https://www.education.gov.bf/accueil",
+      "type": "ministere",
+      "shared_site": true
+    },
+    {
+      "name": "Ministère de l'Enseignement supérieur, de la Recherche et de l'Innovation",
+      "url": "https://www.mesrsi.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère de l'Environnement, de l'Eau et de l'Assainissement",
+      "url": "https://www.environnement.gov.bf/",
+      "type": "ministere"
+    },
+    {
+      "name": "Ministère des Sports, de la Jeunesse et de l'Emploi",
+      "url": "https://www.sports.gov.bf/",
+      "type": "ministere"
+    }
+  ]
+}

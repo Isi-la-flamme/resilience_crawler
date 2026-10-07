@@ -1,0 +1,15 @@
+__pycache__/*.pyc
+__pycache__/*.pyd
+
+__pycache__/
+
+crawl.db
+crawl-results.jsonl
+crawler.log.jsonl
+
+.vscode/
+*.egg-info/
+
+.venv/
+documents/
+img/
