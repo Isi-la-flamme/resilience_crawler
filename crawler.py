@@ -303,44 +303,46 @@ class Crawler:
         pending_pages.clear()
         logger.info("SQLite batch saved (%d pages)", count)
 
+
     def _process_url(self, url):
         self._wait_for_delay()
         body, content_type, charset = self.fetcher.fetch(url, retries=self.retries)
-        extension = document_extension(url, content_type)
-        if extension is not None:
-            document = self.document_downloader.save(
-                url,
-                content_type,
-                body,
-                self.site_name,
-            )
-            document["url"] = url
-            self.database.save_document(self.start_url, document)
+
+        kind = self._classify(url, content_type)
+
+        if kind == "document":
+            self._save_document(url, content_type, body)
             return None, []
-        if content_type != "text/html":
+
+        if kind == "skip":
             logger.info("Skipping non-html resource: %s", url)
             return None, []
 
+        return self._build_html_page(url, body, charset)
+
+    def _classify(self, url, content_type):
+        if document_extension(url, content_type) is not None:
+            return "document"
+        if content_type == "text/html":
+            return "html"
+        return "skip"
+
+    def _save_document(self, url, content_type, body):
+        document = self.document_downloader.save(
+            url,
+            content_type,
+            body,
+            self.site_name,
+        )
+        document["url"] = url
+        self.database.save_document(self.start_url, document)
+
+    def _build_html_page(self, url, body, charset):
         html = body.decode(charset or "utf-8", errors="replace")
         title, raw_links, raw_images, published_at, content = PageParser.parse_html(html)
         links = self._normalize_resources(url, raw_links, same_origin=True)
         image_urls = self._normalize_resources(url, raw_images, same_origin=False)
-        downloaded_images = []
-
-        for image_url in image_urls:
-            if not self.database.claim_image(image_url):
-                image_path = self.database.image_path(image_url)
-                if image_path is not None:
-                    downloaded_images.append(str(image_path))
-                continue
-            try:
-                image_path = self.image_downloader.download(image_url)
-            except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
-                self.database.fail_image(image_url, error)
-                logger.warning("Image download failed for %s: %s", image_url, error, exc_info=True)
-            else:
-                self.database.finish_image(image_url, image_path)
-                downloaded_images.append(str(image_path))
+        downloaded_images = self._download_images(image_urls)
 
         page = {
             "url": url,
@@ -354,6 +356,31 @@ class Crawler:
             "downloaded_images": downloaded_images,
         }
         return page, links
+
+    def _download_images(self, image_urls):
+        downloaded = []
+        for image_url in image_urls:
+            if not self.database.claim_image(image_url):
+                existing = self.database.image_path(image_url)
+                if existing is not None:
+                    downloaded.append(str(existing))
+                continue
+            try:
+                image_path = self.image_downloader.download(image_url)
+            except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+                self.database.fail_image(image_url, error)
+                logger.warning(
+                    "Image download failed for %s: %s",
+                    image_url,
+                    error,
+                    exc_info=True,
+                )
+            else:
+                self.database.finish_image(image_url, image_path)
+                downloaded.append(str(image_path))
+        return downloaded
+
+
 
     def _normalize_resources(self, page_url, resources, same_origin):
         normalized_urls = []
