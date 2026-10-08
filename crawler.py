@@ -115,182 +115,179 @@ class Crawler:
         if any(crawler.database is not crawlers[0].database for crawler in crawlers):
             raise ValueError("Tous les crawlers doivent partager la même base SQLite.")
 
-        states = []
-        for crawler in crawlers:
-            crawler.database.enqueue(crawler.start_url, [crawler.start_url])
-            states.append({
-                "crawler": crawler,
-                "pages": [],
-                "errors": [],
-                "pending_pages": [],
-                "active_count": 0,
-                "last_flush": time.monotonic(),
-            })
-            logger.info(
-                "CRAWL start %s (limit=%d shared_workers=%d)",
-                crawler.start_url,
-                crawler.max_pages,
-                max(item.workers for item in crawlers),
-            )
-
+        states = [cls._init_state(crawler) for crawler in crawlers]
         max_workers = max(crawler.workers for crawler in crawlers)
-        cursor = 0
 
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="crawler") as executor:
             active = {}
             while True:
-                while len(active) < max_workers:
-                    scheduled = False
-                    consumed_url = False
-                    for _ in range(len(states)):
-                        state = states[cursor]
-                        cursor = (cursor + 1) % len(states)
-                        crawler = state["crawler"]
-                        if (
-                            crawler.database.page_count(crawler.start_url)
-                            + len(state["pending_pages"])
-                            + state["active_count"]
-                            >= crawler.max_pages
-                        ):
-                            continue
-
-                        url = crawler.database.claim_next(crawler.start_url)
-                        if url is None:
-                            continue
-                        consumed_url = True
-                        if not crawler._robots.can_fetch(USER_AGENT, url):
-                            crawler.database.set_url_status(
-                                crawler.start_url, url, "blocked"
-                            )
-                            logger.info("Ignoring blocked URL per robots.txt: %s", url)
-                            continue
-                        try:
-                            ping_status = crawler.ping_checker.ping(url)
-                        except (HTTPError, URLError, TimeoutError, OSError) as error:
-                            crawler.database.set_url_status(
-                                crawler.start_url, url, "failed", str(error)
-                            )
-                            state["errors"].append({"url": url, "error": str(error)})
-                            logger.warning("URL check failed for %s: %s", url, error)
-                            continue
-                        if ping_status in MISSING_STATUS_CODES:
-                            crawler.database.set_url_status(
-                                crawler.start_url, url, "skipped"
-                            )
-                            logger.info(
-                                "COLLECTOR skipped missing URL HTTP %d: %s",
-                                ping_status,
-                                url,
-                            )
-                            continue
-
-                        logger.info(
-                            "COLLECTOR queued live URL HTTP %d: %s",
-                            ping_status,
-                            url,
-                        )
-                        future = executor.submit(crawler._process_url, url)
-                        active[future] = (state, url)
-                        state["active_count"] += 1
-                        scheduled = True
-                        break
-                    if not scheduled:
-                        if consumed_url:
-                            continue
-                        break
+                cls._schedule_available(states, active, executor, max_workers)
 
                 now = time.monotonic()
-                for state in states:
-                    pending_pages = state["pending_pages"]
-                    crawler = state["crawler"]
-                    if pending_pages and (
-                        now - state["last_flush"] >= crawler.database_flush_interval
-                    ):
-                        crawler._flush_pages(pending_pages)
-                        state["last_flush"] = now
+                cls._flush_due(states, now)
 
                 if not active:
-                    pending_states = [state for state in states if state["pending_pages"]]
-                    if pending_states:
-                        for state in pending_states:
-                            state["crawler"]._flush_pages(state["pending_pages"])
-                            state["last_flush"] = time.monotonic()
+                    if cls._flush_all_pending(states):
                         continue
                     break
 
-                flush_deadlines = [
-                    max(
-                        0,
-                        state["crawler"].database_flush_interval
-                        - (now - state["last_flush"]),
-                    )
-                    for state in states
-                    if state["pending_pages"]
-                ]
-                timeout = min(flush_deadlines) if flush_deadlines else None
+                timeout = cls._next_wait_timeout(states, now)
                 completed, _ = wait(
                     active,
                     timeout=timeout,
                     return_when=FIRST_COMPLETED,
                 )
-                if not completed:
-                    continue
+                if completed:
+                    cls._drain_completed(completed, active, states)
 
-                for future in completed:
-                    state, url = active.pop(future)
-                    crawler = state["crawler"]
-                    state["active_count"] -= 1
-                    try:
-                        page, discovered_urls = future.result()
-                    except HTTPError as error:
-                        if error.code in MISSING_STATUS_CODES:
-                            crawler.database.set_url_status(
-                                crawler.start_url, url, "skipped"
-                            )
-                            logger.info(
-                                "Ignoring missing resource HTTP %d: %s",
-                                error.code,
-                                url,
-                            )
-                        else:
-                            crawler.database.set_url_status(
-                                crawler.start_url, url, "failed", str(error)
-                            )
-                            state["errors"].append({"url": url, "error": str(error)})
-                            logger.warning("Failed fetch for %s: %s", url, error)
-                        continue
-                    except (URLError, TimeoutError, OSError, ValueError) as error:
-                        crawler.database.set_url_status(
-                            crawler.start_url, url, "failed", str(error)
-                        )
-                        state["errors"].append({"url": url, "error": str(error)})
-                        logger.warning(
-                            "Failed fetch for %s after retries: %s",
-                            url,
-                            error,
-                        )
-                        continue
+        return cls._collect_results(states)
 
-                    if page is None:
-                        if not crawler.database.has_document(crawler.start_url, url):
-                            crawler.database.set_url_status(
-                                crawler.start_url, url, "skipped"
-                            )
-                        continue
+    @staticmethod
+    def _init_state(crawler):
+        crawler.database.enqueue(crawler.start_url, [crawler.start_url])
+        logger.info(
+            "CRAWL start %s (limit=%d shared_workers=%d)",
+            crawler.start_url,
+            crawler.max_pages,
+            crawler.workers,
+        )
+        return {
+            "crawler": crawler,
+            "pages": [],
+            "errors": [],
+            "pending_pages": [],
+            "active_count": 0,
+            "last_flush": time.monotonic(),
+        }
 
-                    crawler.database.enqueue(crawler.start_url, discovered_urls)
-                    state["pending_pages"].append((page, discovered_urls))
-                    state["pages"].append(page)
-                    logger.info(
-                        "PAGE %d/%d %s (links=%d images=%d)",
-                        crawler.database.page_count(crawler.start_url)
-                        + len(state["pending_pages"]),
-                        crawler.max_pages,
-                        url,
-                        len(page["links"]),
-                        len(page["images"]),
-                    )
+    @staticmethod
+    def _schedule_available(states, active, executor, max_workers):
+        """Remplit le pool tant qu'il reste de la place et des URLs éligibles."""
+        while len(active) < max_workers:
+            if not Crawler._schedule_one_round(states, active, executor):
+                break
 
+    @staticmethod
+    def _schedule_one_round(states, active, executor):
+        """Une passe sur tous les états. Retourne True si une URL a été soumise ou consommée."""
+        progress = False
+        for state in states:
+            crawler = state["crawler"]
+            if (
+                crawler.database.page_count(crawler.start_url)
+                + len(state["pending_pages"])
+                + state["active_count"]
+                >= crawler.max_pages
+            ):
+                continue
+
+            url = crawler.database.claim_next(crawler.start_url)
+            if url is None:
+                continue
+            progress = True
+
+            if not crawler._robots.can_fetch(USER_AGENT, url):
+                crawler.database.set_url_status(crawler.start_url, url, "blocked")
+                logger.info("Ignoring blocked URL per robots.txt: %s", url)
+                continue
+
+            try:
+                ping_status = crawler.ping_checker.ping(url)
+            except (HTTPError, URLError, TimeoutError, OSError) as error:
+                crawler.database.set_url_status(crawler.start_url, url, "failed", str(error))
+                state["errors"].append({"url": url, "error": str(error)})
+                logger.warning("URL check failed for %s: %s", url, error)
+                continue
+
+            if ping_status in MISSING_STATUS_CODES:
+                crawler.database.set_url_status(crawler.start_url, url, "skipped")
+                logger.info("COLLECTOR skipped missing URL HTTP %d: %s", ping_status, url)
+                continue
+
+            logger.info("COLLECTOR queued live URL HTTP %d: %s", ping_status, url)
+            future = executor.submit(crawler._process_url, url)
+            active[future] = (state, url)
+            state["active_count"] += 1
+            return True
+
+        return progress
+
+    @staticmethod
+    def _flush_due(states, now):
+        for state in states:
+            if (
+                state["pending_pages"]
+                and now - state["last_flush"] >= state["crawler"].database_flush_interval
+            ):
+                state["crawler"]._flush_pages(state["pending_pages"])
+                state["last_flush"] = now
+
+    @staticmethod
+    def _flush_all_pending(states):
+        flushed = False
+        for state in states:
+            if state["pending_pages"]:
+                state["crawler"]._flush_pages(state["pending_pages"])
+                state["last_flush"] = time.monotonic()
+                flushed = True
+        return flushed
+
+    @staticmethod
+    def _next_wait_timeout(states, now):
+        deadlines = [
+            max(0, state["crawler"].database_flush_interval - (now - state["last_flush"]))
+            for state in states
+            if state["pending_pages"]
+        ]
+        return min(deadlines) if deadlines else None
+
+    @staticmethod
+    def _drain_completed(completed, active, states):
+        for future in completed:
+            state, url = active.pop(future)
+            crawler = state["crawler"]
+            state["active_count"] -= 1
+            try:
+                page, discovered_urls = future.result()
+            except HTTPError as error:
+                Crawler._handle_http_error(state, url, error)
+                continue
+            except (URLError, TimeoutError, OSError, ValueError) as error:
+                crawler.database.set_url_status(crawler.start_url, url, "failed", str(error))
+                state["errors"].append({"url": url, "error": str(error)})
+                logger.warning("Failed fetch for %s after retries: %s", url, error)
+                continue
+
+            if page is None:
+                if not crawler.database.has_document(crawler.start_url, url):
+                    crawler.database.set_url_status(crawler.start_url, url, "skipped")
+                continue
+
+            crawler.database.enqueue(crawler.start_url, discovered_urls)
+            state["pending_pages"].append((page, discovered_urls))
+            state["pages"].append(page)
+            logger.info(
+                "PAGE %d/%d %s (links=%d images=%d)",
+                crawler.database.page_count(crawler.start_url) + len(state["pending_pages"]),
+                crawler.max_pages,
+                url,
+                len(page["links"]),
+                len(page["images"]),
+            )
+
+    @staticmethod
+    def _handle_http_error(state, url, error):
+        crawler = state["crawler"]
+        if error.code in MISSING_STATUS_CODES:
+            crawler.database.set_url_status(crawler.start_url, url, "skipped")
+            logger.info("Ignoring missing resource HTTP %d: %s", error.code, url)
+            return
+        crawler.database.set_url_status(crawler.start_url, url, "failed", str(error))
+        state["errors"].append({"url": url, "error": str(error)})
+        logger.warning("Failed fetch for %s: %s", url, error)
+
+    @staticmethod
+    def _collect_results(states):
         results = []
         for state in states:
             if state["pending_pages"]:
