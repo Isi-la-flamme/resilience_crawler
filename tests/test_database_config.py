@@ -8,7 +8,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 
 from config import load_config
-from crawler import configure_logging
+from logging_setup import configure_logging
 from database import CrawlDatabase
 from json_logging import JsonLineFormatter
 

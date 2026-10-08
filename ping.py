@@ -4,6 +4,8 @@ from urllib.error import HTTPError
 
 from urllib.request import Request, urlopen
 
+from constants import USER_AGENT
+
 
 
 
@@ -20,7 +22,7 @@ MISSING_STATUS_CODES = {404, 410}
 
 class PingChecker:
 
-    def __init__(self, timeout=5, user_agent="YennengaCrawl/1.0", before_request=None):
+    def __init__(self, timeout=5, user_agent=USER_AGENT, before_request=None):
 
         self.timeout = timeout
 

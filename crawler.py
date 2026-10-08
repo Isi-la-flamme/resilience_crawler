@@ -1,25 +1,35 @@
-import argparse
-import json
 import logging
 import threading
 import time
+
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
 from pathlib import Path
+
 from urllib.error import HTTPError, URLError
+
 from urllib.parse import urljoin, urlsplit, urlunsplit
+
 from urllib.robotparser import RobotFileParser
 
-from config import DEFAULT_CONFIG_PATH, load_config
+
+from constants import USER_AGENT
+
 from database import CrawlDatabase
+
 from document_downloader import DocumentDownloader, document_extension
+
 from fetcher import Fetcher
+
 from image_downloader import ImageDownloader
-from json_logging import JsonLineFormatter
+
 from parser import PageParser
+
 from ping import MISSING_STATUS_CODES, PingChecker
 
+
 logger = logging.getLogger(__name__)
-USER_AGENT = "YennengaCrawl/1.0"
+
 
 
 class Crawler:
@@ -446,67 +456,3 @@ class Crawler:
         parts = urlsplit(url)
         return parts.scheme.lower(), parts.netloc.lower()
 
-
-def configure_logging(config):
-    config["log_path"].parent.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(config["log_path"], encoding="utf-8")
-    file_handler.setFormatter(JsonLineFormatter())
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    ))
-    root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, config["log_level"]))
-    root_logger.addHandler(file_handler)
-    root_logger.addHandler(console_handler)
-    return file_handler, console_handler
-
-
-def main():
-    cli = argparse.ArgumentParser(description="Explore les URL définies dans config.json.")
-    cli.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Chemin du fichier de configuration")
-    args = cli.parse_args()
-
-    try:
-        config = load_config(args.config)
-        log_handlers = configure_logging(config)
-        with CrawlDatabase(config["database_path"]) as database:
-            crawlers = [
-                Crawler(
-                    start_url,
-                    max_pages=config["max_pages"],
-                    delay=config["delay"],
-                    timeout=config["timeout"],
-                    retries=config["retries"],
-                    max_response_bytes=config["max_response_bytes"],
-                    workers=config["workers"],
-                    image_dir=config["images_path"],
-                    documents_dir=config["documents_path"],
-                    crawler_name=config["crawler_name"],
-                    database_flush_interval=config["database_flush_interval"],
-                    database=database,
-                )
-                for start_url in config["start_urls"]
-            ]
-            Crawler.crawl_many(crawlers)
-            summary = database.summary()
-        print(
-            "Crawl terminé : "
-            f"{summary['pages']} pages enregistrées, "
-            f"{summary['images']} images t?l?charg?es, "
-            f"{summary['documents']} documents t?l?charg?s."
-        )
-    except KeyboardInterrupt:
-        cli.exit(130, "Crawler interrompu ; file enregistrée dans SQLite.\n")
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError) as error:
-        cli.exit(1, f"Erreur de configuration, réseau ou enregistrement : {error}\n")
-    finally:
-        if "log_handlers" in locals():
-            for handler in log_handlers:
-                logging.getLogger().removeHandler(handler)
-                handler.close()
-
-
-if __name__ == "__main__":
-    main()

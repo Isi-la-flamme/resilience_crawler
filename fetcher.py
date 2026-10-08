@@ -2,13 +2,14 @@ import logging
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from constants import USER_AGENT
 
 logger = logging.getLogger(__name__)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 class Fetcher:
-    def __init__(self, timeout=10, max_response_bytes=5 * 1024 * 1024, user_agent="YennengaCrawl/1.0"):
+    def __init__(self, timeout=10, max_response_bytes=5 * 1024 * 1024, user_agent=USER_AGENT):
         self.timeout = timeout
         self.max_response_bytes = max_response_bytes
         self.user_agent = user_agent
