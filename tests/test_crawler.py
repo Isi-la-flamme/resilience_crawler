@@ -8,8 +8,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from unittest.mock import patch
 
-from crawler import Crawler
-from database import CrawlDatabase
+from crawler import Crawler, CrawlDatabase
 
 
 class TestHandler(BaseHTTPRequestHandler):

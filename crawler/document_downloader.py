@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from file_store import FileStore, full_url_hash
+from .file_store import FileStore, full_url_hash
 
 
 logger = logging.getLogger(__name__)

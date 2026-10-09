@@ -4,11 +4,9 @@ import logging
 
 from urllib.error import HTTPError, URLError
 
-from config import DEFAULT_CONFIG_PATH, load_config
-from constants import USER_AGENT  # noqa: F401  (conservé pour compat imports externes)
-from crawler import Crawler
-from database import CrawlDatabase
-from logging_setup import configure_logging
+from crawler import Crawler, CrawlDatabase
+from crawler.config import DEFAULT_CONFIG_PATH, load_config
+from crawler.logging_setup import configure_logging
 
 
 def main():

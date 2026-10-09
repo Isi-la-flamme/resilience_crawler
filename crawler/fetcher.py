@@ -2,8 +2,8 @@ import logging
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-from constants import USER_AGENT
-from metrics import metrics
+from .constants import USER_AGENT
+from .metrics import metrics
 
 logger = logging.getLogger(__name__)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}

@@ -7,10 +7,10 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 
-from config import load_config
-from logging_setup import configure_logging
-from database import CrawlDatabase
-from json_logging import JsonLineFormatter
+from crawler.config import load_config
+from crawler.database import CrawlDatabase
+from crawler.json_logging import JsonLineFormatter
+from crawler.logging_setup import configure_logging
 
 
 class DatabaseConfigTests(unittest.TestCase):

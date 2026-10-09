@@ -5,9 +5,9 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from metrics import metrics
+from .metrics import metrics
 
-from file_store import full_url_hash
+from .file_store import full_url_hash
 
 logger = logging.getLogger(__name__)
 

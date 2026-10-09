@@ -13,18 +13,18 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
 
-from constants import USER_AGENT
-from metrics import metrics
+from .constants import USER_AGENT
+from .metrics import metrics
 
-from database import CrawlDatabase
+from .database import CrawlDatabase
 
-from document_downloader import DocumentDownloader, document_extension
+from .document_downloader import DocumentDownloader, document_extension
 
-from fetcher import Fetcher
+from .fetcher import Fetcher
 
-from image_downloader import ImageDownloader
+from .image_downloader import ImageDownloader
 
-from parser import PageParser
+from .parser import PageParser
 
 
 logger = logging.getLogger(__name__)

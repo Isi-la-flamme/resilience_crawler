@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from metrics import Metrics
+from crawler.metrics import Metrics
 
 
 class MetricsTests(unittest.TestCase):

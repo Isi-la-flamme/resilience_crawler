@@ -3,7 +3,7 @@ import mimetypes
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from file_store import FileStore
+from .file_store import FileStore
 
 
 logger = logging.getLogger(__name__)

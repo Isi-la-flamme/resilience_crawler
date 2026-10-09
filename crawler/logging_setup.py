@@ -1,6 +1,6 @@
 import logging
 
-from json_logging import JsonLineFormatter
+from .json_logging import JsonLineFormatter
 
 
 def configure_logging(config):
