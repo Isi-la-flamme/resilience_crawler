@@ -14,6 +14,7 @@ from urllib.robotparser import RobotFileParser
 
 
 from constants import USER_AGENT
+from metrics import metrics
 
 from database import CrawlDatabase
 
@@ -70,7 +71,7 @@ class Crawler:
         self.crawler_name = crawler_name
         self.database_flush_interval = database_flush_interval
         self.sleep = sleep
-        self._next_request_at = 0.0
+        self._next_request_at = {}
         self._rate_limit_lock = threading.Lock()
         self.fetcher = fetcher or Fetcher(
             timeout=timeout,
@@ -139,6 +140,7 @@ class Crawler:
                 )
                 if completed:
                     cls._drain_completed(completed, active, states)
+        metrics.dump(Path("metrics.json"))
 
         return cls._collect_results(states)
 
@@ -312,7 +314,7 @@ class Crawler:
 
 
     def _process_url(self, url):
-        self._wait_for_delay()
+        self._wait_for_delay(url)
         body, content_type, charset = self.fetcher.fetch(url, retries=self.retries)
 
         kind = self._classify(url, content_type)
@@ -346,7 +348,8 @@ class Crawler:
 
     def _build_html_page(self, url, body, charset):
         html = body.decode(charset or "utf-8", errors="replace")
-        title, raw_links, raw_images, published_at, content = PageParser.parse_html(html)
+        with metrics.measure("parse"):
+            title, raw_links, raw_images, published_at, content = PageParser.parse_html(html)
         links = self._normalize_resources(url, raw_links, same_origin=True)
         image_urls = self._normalize_resources(url, raw_images, same_origin=False)
         downloaded_images = self._download_images(image_urls)
@@ -364,6 +367,7 @@ class Crawler:
         }
         return page, links
 
+    
     def _download_images(self, image_urls):
         downloaded = []
         for image_url in image_urls:
@@ -373,7 +377,8 @@ class Crawler:
                     downloaded.append(str(existing))
                 continue
             try:
-                image_path = self.image_downloader.download(image_url)
+                with metrics.measure("image"):
+                    image_path = self.image_downloader.download(image_url)
             except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
                 self.database.fail_image(image_url, error)
                 logger.warning(
@@ -386,8 +391,7 @@ class Crawler:
                 self.database.finish_image(image_url, image_path)
                 downloaded.append(str(image_path))
         return downloaded
-
-
+    
 
     def _normalize_resources(self, page_url, resources, same_origin):
         normalized_urls = []
@@ -407,27 +411,39 @@ class Crawler:
         parser = RobotFileParser()
         parser.set_url(robots_url)
         try:
-            self._wait_for_delay()
+            self._wait_for_delay(robots_url)
             body, _, charset = self.fetcher.fetch(robots_url, retries=self.retries)
         except HTTPError as error:
-            if error.code != 404:
-                raise
-            logger.info("No robots.txt at %s", robots_url)
+            if error.code == 404:
+                logger.info("No robots.txt at %s", robots_url)
+            else:
+                logger.warning(
+                    "robots.txt unavailable HTTP %d for %s — assuming allow-all",
+                    error.code,
+                    robots_url,
+                )
             parser.parse([])
         except (URLError, TimeoutError, OSError, ValueError) as error:
-            logger.warning("robots fetch failed for %s: %s", robots_url, error)
+            logger.warning(
+                "robots fetch failed for %s: %s — assuming allow-all",
+                robots_url,
+                error,
+            )
             parser.parse([])
         else:
             parser.parse(body.decode(charset or "utf-8", errors="replace").splitlines())
         return parser
 
-    def _wait_for_delay(self):
-        with self._rate_limit_lock:
-            now = time.monotonic()
-            wait_seconds = max(0.0, self._next_request_at - now)
-            if wait_seconds:
-                self.sleep(wait_seconds)
-            self._next_request_at = time.monotonic() + self.delay
+    def _wait_for_delay(self, url):
+        with metrics.measure("wait"):
+            host = urlsplit(url).hostname or ""
+            with self._rate_limit_lock:
+                now = time.monotonic()
+                wait_seconds = max(0.0, self._next_request_at.get(host, 0.0) - now)
+                if wait_seconds:
+                    logger.info("WAIT host=%s sleep=%.2fs", host, wait_seconds)
+                    self.sleep(wait_seconds)
+                self._next_request_at[host] = time.monotonic() + self.delay
 
     def _normalize_url(self, url, same_origin=True):
         parts = urlsplit(url)

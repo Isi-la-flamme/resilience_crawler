@@ -14,10 +14,10 @@ class ImageDownloader:
         self.fetcher = fetcher
         self.store = FileStore(output_dir)
         self.retries = retries
-        self.before_request = before_request or (lambda: None)
+        self.before_request = before_request or (lambda url: None)
 
     def download(self, url):
-        self.before_request()
+        self.before_request(url)
         body, content_type, _ = self.fetcher.fetch(url, retries=self.retries)
         if not content_type.startswith("image/"):
             raise ValueError(f"Ressource non image ({content_type}) : {url}")

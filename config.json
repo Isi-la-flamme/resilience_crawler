@@ -1,11 +1,11 @@
 {
   "start_urls": [
-    "https://www.presidencedufaso.bf/",
-    "https://primature.gov.bf/",
-    "https://gouvernement.gov.bf/",
-    "https://www.defense.gov.bf/"
+    "https://www.fonction-publique.gov.bf/",
+    "https://www.communication.gov.bf/",
+    "https://www.matd.gov.bf/accueil",
+    "https://diplomatie.gov.bf/"
   ],
-  "max_pages": 1000,
+  "max_pages": 10,
   "workers": 4,
   "delay": 1.0,
   "timeout": 30,

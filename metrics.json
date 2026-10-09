@@ -1,0 +1,32 @@
+{
+  "wait": {
+    "total_seconds": 535.1484,
+    "calls": 347,
+    "avg_ms": 1542.21
+  },
+  "fetch": {
+    "total_seconds": 281.501,
+    "calls": 307,
+    "avg_ms": 916.94
+  },
+  "ping": {
+    "total_seconds": 78.1875,
+    "calls": 40,
+    "avg_ms": 1954.69
+  },
+  "parse": {
+    "total_seconds": 0.8979,
+    "calls": 40,
+    "avg_ms": 22.45
+  },
+  "image": {
+    "total_seconds": 625.0082,
+    "calls": 263,
+    "avg_ms": 2376.46
+  },
+  "db": {
+    "total_seconds": 0.3216,
+    "calls": 17,
+    "avg_ms": 18.92
+  }
+}

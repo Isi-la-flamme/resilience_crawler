@@ -5,6 +5,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from metrics import metrics
+
 from file_store import full_url_hash
 
 logger = logging.getLogger(__name__)
@@ -215,50 +217,52 @@ class CrawlDatabase:
 
     def save_pages(self, start_url, page_results):
         now = datetime.now(timezone.utc).isoformat()
-        with self._lock, self._connection:
-            for page, discovered_urls in page_results:
-                self._connection.execute(
-                    """INSERT INTO pages
-                       (start_url, url, url_hash, title, published_at, content, html, crawler_name,
-                        links_json, images_json, crawled_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(start_url, url) DO UPDATE SET
-                        title=excluded.title,
-                        url_hash=excluded.url_hash,
-                        published_at=excluded.published_at,
-                        content=excluded.content,
-                        html=excluded.html,
-                        crawler_name=excluded.crawler_name,
-                        links_json=excluded.links_json,
-                        images_json=excluded.images_json,
-                        crawled_at=excluded.crawled_at""",
-                    (
-                        start_url,
-                        page["url"],
-                        self.page_url_hash(page["url"]),
-                        page["title"],
-                        page.get("published_at"),
-                        page.get("content"),
-                        page.get("html"),
-                        page.get("crawler_name", "Yennenga Crawl"),
-                        json.dumps(page["links"], ensure_ascii=False),
-                        json.dumps(page["images"], ensure_ascii=False),
-                        now,
-                    ),
-                )
-                row = self._connection.execute(
-                    "SELECT id, crawled_at FROM pages WHERE start_url=? AND url=?",
-                    (start_url, page["url"]),
-                ).fetchone()
-                page["id"], page["crawled_at"] = row
-                self._connection.execute(
-                    "UPDATE url_queue SET status='done', error=NULL WHERE start_url=? AND url=?",
-                    (start_url, page["url"]),
-                )
-                self._connection.executemany(
-                    "INSERT OR IGNORE INTO url_queue(start_url, url) VALUES (?, ?)",
-                    ((start_url, url) for url in discovered_urls),
-                )
+
+        with metrics.measure("db"):
+            with self._lock, self._connection:
+                for page, discovered_urls in page_results:
+                    self._connection.execute(
+                        """INSERT INTO pages
+                        (start_url, url, url_hash, title, published_at, content, html, crawler_name,
+                            links_json, images_json, crawled_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(start_url, url) DO UPDATE SET
+                            title=excluded.title,
+                            url_hash=excluded.url_hash,
+                            published_at=excluded.published_at,
+                            content=excluded.content,
+                            html=excluded.html,
+                            crawler_name=excluded.crawler_name,
+                            links_json=excluded.links_json,
+                            images_json=excluded.images_json,
+                            crawled_at=excluded.crawled_at""",
+                        (
+                            start_url,
+                            page["url"],
+                            self.page_url_hash(page["url"]),
+                            page["title"],
+                            page.get("published_at"),
+                            page.get("content"),
+                            page.get("html"),
+                            page.get("crawler_name", "Yennenga Crawl"),
+                            json.dumps(page["links"], ensure_ascii=False),
+                            json.dumps(page["images"], ensure_ascii=False),
+                            now,
+                        ),
+                    )
+                    row = self._connection.execute(
+                        "SELECT id, crawled_at FROM pages WHERE start_url=? AND url=?",
+                        (start_url, page["url"]),
+                    ).fetchone()
+                    page["id"], page["crawled_at"] = row
+                    self._connection.execute(
+                        "UPDATE url_queue SET status='done', error=NULL WHERE start_url=? AND url=?",
+                        (start_url, page["url"]),
+                    )
+                    self._connection.executemany(
+                        "INSERT OR IGNORE INTO url_queue(start_url, url) VALUES (?, ?)",
+                        ((start_url, url) for url in discovered_urls),
+                    )
 
     def save_document(self, start_url, document):
         downloaded_at = datetime.now(timezone.utc).isoformat()
