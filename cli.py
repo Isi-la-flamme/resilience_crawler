@@ -29,6 +29,7 @@ def main():
                     retries=config["retries"],
                     max_response_bytes=config["max_response_bytes"],
                     workers=config["workers"],
+                    image_batch_size=config["image_batch_size"],
                     image_dir=config["images_path"],
                     documents_dir=config["documents_path"],
                     crawler_name=config["crawler_name"],
@@ -37,13 +38,18 @@ def main():
                 )
                 for start_url in config["start_urls"]
             ]
-            Crawler.crawl_many(crawlers)
+            previous_summary = database.summary()
+            results = Crawler.crawl_many(crawlers)
             summary = database.summary()
+        new_page_count = sum(len(result["pages"]) for result in results)
+        new_image_count = summary["images"] - previous_summary["images"]
+        new_document_count = summary["documents"] - previous_summary["documents"]
         print(
             "Crawl terminé : "
-            f"{summary['pages']} pages enregistrées, "
-            f"{summary['images']} images téléchargées, "
-            f"{summary['documents']} documents téléchargés."
+            f"{new_page_count} nouvelles pages "
+            f"({summary['pages']} au total), "
+            f"{new_image_count} nouvelles images ({summary['images']} au total), "
+            f"{new_document_count} nouveaux documents ({summary['documents']} au total)."
         )
     except KeyboardInterrupt:
         cli.exit(130, "Crawler interrompu ; file enregistrée dans SQLite.\n")

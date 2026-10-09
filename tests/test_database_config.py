@@ -21,6 +21,7 @@ class DatabaseConfigTests(unittest.TestCase):
                 "start_urls": ["https://example.org", "https://example.com"],
                 "max_pages": 25,
                 "workers": 6,
+                "image_batch_size": 3,
                 "delay": 0,
                 "timeout": 5,
                 "retries": 1,
@@ -33,6 +34,7 @@ class DatabaseConfigTests(unittest.TestCase):
             config = load_config(config_path)
 
         self.assertEqual(config["workers"], 6)
+        self.assertEqual(config["image_batch_size"], 3)
         self.assertEqual(config["crawler_name"], "Yennenga Crawl")
         self.assertEqual(config["database_flush_interval"], 30)
         self.assertEqual(config["documents_path"], config_path.parent / "documents")

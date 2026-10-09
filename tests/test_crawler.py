@@ -6,6 +6,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
+from unittest.mock import patch
 
 from crawler import Crawler
 from database import CrawlDatabase
@@ -15,8 +16,11 @@ class TestHandler(BaseHTTPRequestHandler):
     transient_requests = 0
     missing_get_requests = 0
     missing_head_requests = 0
+    head_requests = 0
     slow_active = 0
     slow_max_active = 0
+    image_active = 0
+    image_max_active = 0
     slow_lock = threading.Lock()
 
     def do_GET(self):
@@ -52,6 +56,33 @@ class TestHandler(BaseHTTPRequestHandler):
             self.respond(200, "<title>Unique</title>")
         elif self.path == "/with-image":
             self.respond(200, '<title>Avec image</title><img src="/test-image.png">')
+        elif self.path == "/with-missing-image":
+            self.respond(200, '<title>Image absente</title><img src="/missing-image.png">')
+        elif self.path == "/missing-image.png":
+            self.respond(404, "Image introuvable")
+        elif self.path == "/with-batch-images":
+            self.respond(
+                200,
+                "".join(f'<img src="/batch-image/{index}.png">' for index in range(4)),
+            )
+        elif self.path.startswith("/batch-image/"):
+            with type(self).slow_lock:
+                type(self).image_active += 1
+                type(self).image_max_active = max(
+                    type(self).image_max_active,
+                    type(self).image_active,
+                )
+            try:
+                time.sleep(0.1)
+                body = b"\x89PNG\r\n\x1a\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            finally:
+                with type(self).slow_lock:
+                    type(self).image_active -= 1
         elif self.path == "/structured":
             self.respond(
                 200,
@@ -120,6 +151,7 @@ class TestHandler(BaseHTTPRequestHandler):
             self.respond(404, "Introuvable")
 
     def do_HEAD(self):
+        type(self).head_requests += 1
         if self.path == "/missing":
             type(self).missing_head_requests += 1
             status = 404
@@ -186,8 +218,8 @@ class CrawlerTests(unittest.TestCase):
             result["pages"][0]["links"],
         )
         self.assertEqual(result["errors"], [])
-        self.assertEqual(TestHandler.missing_head_requests, 1)
-        self.assertEqual(TestHandler.missing_get_requests, 0)
+        self.assertEqual(TestHandler.missing_head_requests, 0)
+        self.assertEqual(TestHandler.missing_get_requests, 1)
 
     def test_obeys_page_limit(self):
         result = self.make_crawler(max_pages=1).crawl()
@@ -209,6 +241,31 @@ class CrawlerTests(unittest.TestCase):
 
         self.assertEqual(shared_count, 1)
         self.assertEqual(len(result["pages"]), 4)
+
+    def test_resumes_from_saved_queue_with_page_limit_per_run(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                with patch("crawler.metrics.dump"):
+                    first = self.make_crawler(
+                        "/queue-root",
+                        database=database,
+                        max_pages=2,
+                    ).crawl()
+                    second = self.make_crawler(
+                        "/queue-root",
+                        database=database,
+                        max_pages=2,
+                    ).crawl()
+
+                total_pages = database.page_count(self.base_url + "/queue-root")
+
+        self.assertEqual(len(first["pages"]), 2)
+        self.assertEqual(len(second["pages"]), 2)
+        self.assertEqual(total_pages, 4)
+        self.assertFalse(
+            {page["url"] for page in first["pages"]}
+            & {page["url"] for page in second["pages"]}
+        )
 
     def test_retries_transient_server_error(self):
         TestHandler.transient_requests = 0
@@ -329,27 +386,49 @@ class CrawlerTests(unittest.TestCase):
             self.assertRegex(image_path.name, r"^test-image_[0-9a-f]{8}\.png$")
             self.assertEqual(image_path.read_bytes(), b"\x89PNG\r\n\x1a\n")
 
+    def test_downloads_images_in_configured_batches(self):
+        TestHandler.image_max_active = 0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = self.make_crawler(
+                "/with-batch-images",
+                image_dir=Path(temp_dir) / "img",
+                image_batch_size=3,
+            ).crawl()
+
+        self.assertEqual(len(result["pages"][0]["downloaded_images"]), 4)
+        self.assertGreaterEqual(TestHandler.image_max_active, 2)
+
+    def test_missing_image_is_logged_without_traceback(self):
+        image_url = self.base_url + "/missing-image.png"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                with self.assertLogs("crawler", level="INFO") as logs:
+                    self.make_crawler(
+                        "/with-missing-image",
+                        database=database,
+                    ).crawl()
+                image_status = database._connection.execute(
+                    "SELECT status, error FROM images WHERE url=?",
+                    (image_url,),
+                ).fetchone()
+
+        self.assertEqual(image_status[0], "failed")
+        self.assertIn("HTTP Error 404", image_status[1])
+        self.assertTrue(any("Image unavailable HTTP 404" in entry for entry in logs.output))
+        self.assertFalse(any("Traceback" in entry for entry in logs.output))
+
     def test_workers_fetch_pages_in_parallel(self):
         TestHandler.slow_max_active = 0
         self.make_crawler("/parallel", workers=3).crawl()
 
         self.assertGreaterEqual(TestHandler.slow_max_active, 2)
 
-    def test_single_collector_pings_urls_while_workers_crawl_them(self):
-        crawler = self.make_crawler("/parallel", workers=3)
-        original_ping = crawler.ping_checker.ping
-        collector_threads = []
-
-        def track_ping(url):
-            collector_threads.append(threading.current_thread().name)
-            return original_ping(url)
-
-        crawler.ping_checker.ping = track_ping
-        result = crawler.crawl()
+    def test_fetches_urls_without_preflight_head_requests(self):
+        TestHandler.head_requests = 0
+        result = self.make_crawler("/parallel", workers=3).crawl()
 
         self.assertEqual(len(result["pages"]), 4)
-        self.assertEqual(len(collector_threads), 4)
-        self.assertEqual(set(collector_threads), {"MainThread"})
+        self.assertEqual(TestHandler.head_requests, 0)
 
     def test_start_urls_share_one_worker_pool(self):
         TestHandler.slow_max_active = 0

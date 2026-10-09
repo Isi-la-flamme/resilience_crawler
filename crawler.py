@@ -26,8 +26,6 @@ from image_downloader import ImageDownloader
 
 from parser import PageParser
 
-from ping import MISSING_STATUS_CODES, PingChecker
-
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +41,7 @@ class Crawler:
         retries=2,
         max_response_bytes=5 * 1024 * 1024,
         workers=4,
+        image_batch_size=1,
         image_dir="img",
         documents_dir="documents",
         crawler_name="Yennenga Crawl",
@@ -51,8 +50,8 @@ class Crawler:
         fetcher=None,
         database=None,
     ):
-        if max_pages < 1 or workers < 1:
-            raise ValueError("max_pages et workers doivent être positifs.")
+        if max_pages < 1 or workers < 1 or image_batch_size < 1:
+            raise ValueError("max_pages, workers et image_batch_size doivent être positifs.")
         if delay < 0 or timeout <= 0 or retries < 0:
             raise ValueError("delay doit être positif ou nul, timeout positif et retries positif ou nul.")
         if max_response_bytes < 1:
@@ -68,6 +67,7 @@ class Crawler:
         self.retries = retries
         self.max_response_bytes = max_response_bytes
         self.workers = workers
+        self.image_batch_size = image_batch_size
         self.crawler_name = crawler_name
         self.database_flush_interval = database_flush_interval
         self.sleep = sleep
@@ -88,12 +88,7 @@ class Crawler:
             before_request=self._wait_for_delay,
         )
         self.document_downloader = DocumentDownloader(documents_dir)
-        self.ping_checker = PingChecker(
-            timeout=timeout,
-            user_agent=USER_AGENT,
-            before_request=self._wait_for_delay,
-        )
-        self._robots = self._load_robots()
+        self._robots: RobotFileParser = RobotFileParser()
 
     def crawl(self):
         try:
@@ -116,6 +111,10 @@ class Crawler:
         if any(crawler.database is not crawlers[0].database for crawler in crawlers):
             raise ValueError("Tous les crawlers doivent partager la même base SQLite.")
 
+        metrics.reset()
+        crawl_started = time.monotonic()
+        for crawler in crawlers:
+            crawler._robots = crawler._load_robots()
         states = [cls._init_state(crawler) for crawler in crawlers]
         max_workers = max(crawler.workers for crawler in crawlers)
 
@@ -140,9 +139,17 @@ class Crawler:
                 )
                 if completed:
                     cls._drain_completed(completed, active, states)
-        metrics.dump(Path("metrics.json"))
+        results = cls._collect_results(states)
+        crawl_duration_seconds = time.monotonic() - crawl_started
+        metrics.dump(
+            Path("metrics.json"),
+            workers=max_workers,
+            max_pages=max(crawler.max_pages for crawler in crawlers),
+            image_batch_size=max(crawler.image_batch_size for crawler in crawlers),
+            crawl_duration_seconds=crawl_duration_seconds,
+        )
 
-        return cls._collect_results(states)
+        return results
 
     @staticmethod
     def _init_state(crawler):
@@ -176,8 +183,7 @@ class Crawler:
         for state in states:
             crawler = state["crawler"]
             if (
-                crawler.database.page_count(crawler.start_url)
-                + len(state["pending_pages"])
+                len(state["pages"])
                 + state["active_count"]
                 >= crawler.max_pages
             ):
@@ -193,20 +199,7 @@ class Crawler:
                 logger.info("Ignoring blocked URL per robots.txt: %s", url)
                 continue
 
-            try:
-                ping_status = crawler.ping_checker.ping(url)
-            except (HTTPError, URLError, TimeoutError, OSError) as error:
-                crawler.database.set_url_status(crawler.start_url, url, "failed", str(error))
-                state["errors"].append({"url": url, "error": str(error)})
-                logger.warning("URL check failed for %s: %s", url, error)
-                continue
-
-            if ping_status in MISSING_STATUS_CODES:
-                crawler.database.set_url_status(crawler.start_url, url, "skipped")
-                logger.info("COLLECTOR skipped missing URL HTTP %d: %s", ping_status, url)
-                continue
-
-            logger.info("COLLECTOR queued live URL HTTP %d: %s", ping_status, url)
+            logger.info("COLLECTOR queued URL: %s", url)
             future = executor.submit(crawler._process_url, url)
             active[future] = (state, url)
             state["active_count"] += 1
@@ -270,7 +263,7 @@ class Crawler:
             state["pages"].append(page)
             logger.info(
                 "PAGE %d/%d %s (links=%d images=%d)",
-                crawler.database.page_count(crawler.start_url) + len(state["pending_pages"]),
+                len(state["pages"]),
                 crawler.max_pages,
                 url,
                 len(page["links"]),
@@ -280,7 +273,7 @@ class Crawler:
     @staticmethod
     def _handle_http_error(state, url, error):
         crawler = state["crawler"]
-        if error.code in MISSING_STATUS_CODES:
+        if error.code in {404, 410}:
             crawler.database.set_url_status(crawler.start_url, url, "skipped")
             logger.info("Ignoring missing resource HTTP %d: %s", error.code, url)
             return
@@ -369,28 +362,58 @@ class Crawler:
 
     
     def _download_images(self, image_urls):
-        downloaded = []
+        downloaded_paths = {}
+        pending_urls = []
         for image_url in image_urls:
             if not self.database.claim_image(image_url):
                 existing = self.database.image_path(image_url)
                 if existing is not None:
-                    downloaded.append(str(existing))
+                    downloaded_paths[image_url] = str(existing)
                 continue
-            try:
-                with metrics.measure("image"):
-                    image_path = self.image_downloader.download(image_url)
-            except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
-                self.database.fail_image(image_url, error)
+            pending_urls.append(image_url)
+
+        if self.image_batch_size == 1:
+            results = map(self._download_image, pending_urls)
+            for image_url, image_path in zip(pending_urls, results):
+                if image_path is not None:
+                    downloaded_paths[image_url] = str(image_path)
+        else:
+            with ThreadPoolExecutor(max_workers=self.image_batch_size) as executor:
+                for batch_start in range(0, len(pending_urls), self.image_batch_size):
+                    batch = pending_urls[batch_start:batch_start + self.image_batch_size]
+                    for image_url, image_path in zip(batch, executor.map(self._download_image, batch)):
+                        if image_path is not None:
+                            downloaded_paths[image_url] = str(image_path)
+
+        return [downloaded_paths[url] for url in image_urls if url in downloaded_paths]
+
+    def _download_image(self, image_url):
+        try:
+            with metrics.measure("image"):
+                image_path = self.image_downloader.download(image_url)
+        except HTTPError as error:
+            self.database.fail_image(image_url, error)
+            if error.code in {404, 410}:
+                logger.info("Image unavailable HTTP %d: %s", error.code, image_url)
+            else:
                 logger.warning(
                     "Image download failed for %s: %s",
                     image_url,
                     error,
                     exc_info=True,
                 )
-            else:
-                self.database.finish_image(image_url, image_path)
-                downloaded.append(str(image_path))
-        return downloaded
+        except (URLError, TimeoutError, OSError, ValueError) as error:
+            self.database.fail_image(image_url, error)
+            logger.warning(
+                "Image download failed for %s: %s",
+                image_url,
+                error,
+                exc_info=True,
+            )
+        else:
+            self.database.finish_image(image_url, image_path)
+            return image_path
+        return None
     
 
     def _normalize_resources(self, page_url, resources, same_origin):
@@ -468,4 +491,3 @@ class Crawler:
     def _origin(url):
         parts = urlsplit(url)
         return parts.scheme.lower(), parts.netloc.lower()
-

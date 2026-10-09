@@ -24,6 +24,15 @@ def load_config(path=DEFAULT_CONFIG_PATH):
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ValueError(f"{key} doit être un entier positif.")
 
+    image_batch_size = config.get("image_batch_size", 1)
+    if (
+        not isinstance(image_batch_size, int)
+        or isinstance(image_batch_size, bool)
+        or image_batch_size < 1
+    ):
+        raise ValueError("image_batch_size doit être un entier positif.")
+    config["image_batch_size"] = image_batch_size
+
     for key in ("delay", "timeout"):
         value = config.get(key)
         if not isinstance(value, (int, float)) or isinstance(value, bool):
