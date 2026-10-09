@@ -4,6 +4,9 @@ __pycache__/*.pyd
 __pycache__/
 
 crawl.db
+crawl.db-shm
+crawl.db-wal
+crawl-export.xlsx
 crawl-results.jsonl
 crawler.log.jsonl
 

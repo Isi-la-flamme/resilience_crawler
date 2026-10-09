@@ -49,6 +49,7 @@ class Crawler:
         sleep=time.sleep,
         fetcher=None,
         database=None,
+        refresh=False,
     ):
         if max_pages < 1 or workers < 1 or image_batch_size < 1:
             raise ValueError("max_pages, workers et image_batch_size doivent être positifs.")
@@ -70,6 +71,7 @@ class Crawler:
         self.image_batch_size = image_batch_size
         self.crawler_name = crawler_name
         self.database_flush_interval = database_flush_interval
+        self.refresh = refresh
         self.sleep = sleep
         self._next_request_at = {}
         self._rate_limit_lock = threading.Lock()
@@ -120,8 +122,10 @@ class Crawler:
 
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="crawler") as executor:
             active = {}
+            interrupted = False
             while True:
-                cls._schedule_available(states, active, executor, max_workers)
+                if not interrupted:
+                    cls._schedule_available(states, active, executor, max_workers)
 
                 now = time.monotonic()
                 cls._flush_due(states, now)
@@ -132,11 +136,16 @@ class Crawler:
                     break
 
                 timeout = cls._next_wait_timeout(states, now)
-                completed, _ = wait(
-                    active,
-                    timeout=timeout,
-                    return_when=FIRST_COMPLETED,
-                )
+                try:
+                    completed, _ = wait(
+                        active,
+                        timeout=timeout,
+                        return_when=FIRST_COMPLETED,
+                    )
+                except KeyboardInterrupt:
+                    interrupted = True
+                    logger.info("Interruption reçue ; arrêt de la planification et sauvegarde en cours.")
+                    continue
                 if completed:
                     cls._drain_completed(completed, active, states)
         results = cls._collect_results(states)
@@ -149,11 +158,15 @@ class Crawler:
             crawl_duration_seconds=crawl_duration_seconds,
         )
 
+        if interrupted:
+            raise KeyboardInterrupt
         return results
 
     @staticmethod
     def _init_state(crawler):
         crawler.database.enqueue(crawler.start_url, [crawler.start_url])
+        if crawler.refresh:
+            crawler.database.queue_pages_for_refresh(crawler.start_url)
         logger.info(
             "CRAWL start %s (limit=%d shared_workers=%d)",
             crawler.start_url,
@@ -166,6 +179,8 @@ class Crawler:
             "errors": [],
             "pending_pages": [],
             "active_count": 0,
+            "processed_count": 0,
+            "unchanged_count": 0,
             "last_flush": time.monotonic(),
         }
 
@@ -182,17 +197,26 @@ class Crawler:
         progress = False
         for state in states:
             crawler = state["crawler"]
-            if (
-                len(state["pages"])
-                + state["active_count"]
-                >= crawler.max_pages
-            ):
+            page_count = (
+                state["processed_count"]
+                if crawler.refresh
+                else len(state["pages"])
+            )
+            if page_count + state["active_count"] >= crawler.max_pages:
                 continue
 
-            url = crawler.database.claim_next(crawler.start_url)
+            url = crawler.database.claim_next(
+                crawler.start_url,
+                include_existing=crawler.refresh,
+            )
             if url is None:
                 continue
             progress = True
+
+            if crawler._is_excluded_url(url):
+                crawler.database.set_url_status(crawler.start_url, url, "skipped")
+                logger.info("Ignoring excluded URL: %s", url)
+                continue
 
             if not crawler._robots.can_fetch(USER_AGENT, url):
                 crawler.database.set_url_status(crawler.start_url, url, "blocked")
@@ -242,8 +266,10 @@ class Crawler:
             state, url = active.pop(future)
             crawler = state["crawler"]
             state["active_count"] -= 1
+            if crawler.refresh:
+                state["processed_count"] += 1
             try:
-                page, discovered_urls = future.result()
+                page, discovered_urls, validators, not_modified = future.result()
             except HTTPError as error:
                 Crawler._handle_http_error(state, url, error)
                 continue
@@ -251,6 +277,16 @@ class Crawler:
                 crawler.database.set_url_status(crawler.start_url, url, "failed", str(error))
                 state["errors"].append({"url": url, "error": str(error)})
                 logger.warning("Failed fetch for %s after retries: %s", url, error)
+                continue
+
+            if not_modified:
+                state["unchanged_count"] += 1
+                crawler.database.mark_page_unchanged(
+                    crawler.start_url,
+                    url,
+                    validators,
+                )
+                logger.info("PAGE unchanged: %s", url)
                 continue
 
             if page is None:
@@ -296,6 +332,7 @@ class Crawler:
             results.append({
                 "pages": state["pages"],
                 "errors": state["errors"],
+                "unchanged_pages": state["unchanged_count"],
             })
         return results
 
@@ -308,19 +345,44 @@ class Crawler:
 
     def _process_url(self, url):
         self._wait_for_delay(url)
-        body, content_type, charset = self.fetcher.fetch(url, retries=self.retries)
+        cached_page = (
+            self.database.page_cache(self.start_url, url)
+            if self.refresh
+            else None
+        )
+        request_headers = {}
+        if cached_page and cached_page["etag"]:
+            request_headers["If-None-Match"] = cached_page["etag"]
+        if cached_page and cached_page["last_modified"]:
+            request_headers["If-Modified-Since"] = cached_page["last_modified"]
+        body, content_type, charset, validators = self.fetcher.fetch(
+            url,
+            retries=self.retries,
+            headers=request_headers,
+        )
+        if body is None:
+            if cached_page is None:
+                raise ValueError(f"Réponse HTTP 304 sans page enregistrée : {url}")
+            return None, [], validators, True
 
         kind = self._classify(url, content_type)
 
         if kind == "document":
             self._save_document(url, content_type, body)
-            return None, []
+            return None, [], None, False
 
         if kind == "skip":
             logger.info("Skipping non-html resource: %s", url)
-            return None, []
+            return None, [], None, False
 
-        return self._build_html_page(url, body, charset)
+        html = body.decode(charset or "utf-8", errors="replace")
+        if cached_page and cached_page["html"] == html:
+            return None, [], validators, True
+
+        page, discovered_urls = self._build_html_page(url, body, charset)
+        page["etag"] = validators.get("etag")
+        page["last_modified"] = validators.get("last_modified")
+        return page, discovered_urls, validators, False
 
     def _classify(self, url, content_type):
         if document_extension(url, content_type) is not None:
@@ -424,9 +486,17 @@ class Crawler:
             except ValueError:
                 logger.debug("Ignoring unsupported or out-of-scope URL: %s", resource)
                 continue
+            if self._is_excluded_url(url):
+                logger.info("Ignoring excluded URL: %s", url)
+                continue
             if url not in normalized_urls:
                 normalized_urls.append(url)
         return normalized_urls
+
+    @staticmethod
+    def _is_excluded_url(url):
+        final_path_segment = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+        return final_path_segment.lower() in {"pricing", "token"}
 
     def _load_robots(self):
         parts = urlsplit(self.start_url)
@@ -435,7 +505,7 @@ class Crawler:
         parser.set_url(robots_url)
         try:
             self._wait_for_delay(robots_url)
-            body, _, charset = self.fetcher.fetch(robots_url, retries=self.retries)
+            body, _, charset, _ = self.fetcher.fetch(robots_url, retries=self.retries)
         except HTTPError as error:
             if error.code == 404:
                 logger.info("No robots.txt at %s", robots_url)

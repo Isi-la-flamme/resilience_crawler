@@ -44,6 +44,7 @@ class CrawlDatabase:
                       AND documents.url=url_queue.url
                 )
             """)
+            self._migrate_page_validators()
 
     def close(self):
         with self._lock:
@@ -66,6 +67,8 @@ class CrawlDatabase:
                     start_url TEXT NOT NULL,
                     url TEXT NOT NULL,
                     url_hash TEXT NOT NULL,
+                    etag TEXT,
+                    last_modified TEXT,
                     title TEXT NOT NULL,
                     published_at TEXT,
                     content TEXT,
@@ -98,6 +101,14 @@ class CrawlDatabase:
                 );
             """)
             self._migrate_pages()
+
+    def _migrate_page_validators(self):
+        columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(pages)")
+        }
+        for column in ("etag", "last_modified"):
+            if column not in columns:
+                self._connection.execute(f"ALTER TABLE pages ADD COLUMN {column} TEXT")
 
     def _migrate_pages(self):
         columns = {
@@ -186,11 +197,9 @@ class CrawlDatabase:
                 ((start_url, url) for url in urls),
             )
 
-    def claim_next(self, start_url):
+    def claim_next(self, start_url, include_existing=False):
         with self._lock, self._connection:
-            row = self._connection.execute(
-                """SELECT queue.url FROM url_queue AS queue
-                   WHERE queue.start_url=? AND queue.status='queued'
+            existing_filter = "" if include_existing else """
                      AND NOT EXISTS (
                          SELECT 1 FROM pages
                          WHERE pages.start_url=queue.start_url
@@ -199,7 +208,11 @@ class CrawlDatabase:
                          SELECT 1 FROM documents
                          WHERE documents.start_url=queue.start_url
                            AND documents.url=queue.url
-                     )
+                     )"""
+            row = self._connection.execute(
+                f"""SELECT queue.url FROM url_queue AS queue
+                   WHERE queue.start_url=? AND queue.status='queued'
+                     {existing_filter}
                    ORDER BY queue.rowid LIMIT 1""",
                 (start_url,),
             ).fetchone()
@@ -212,6 +225,46 @@ class CrawlDatabase:
             )
             return url
 
+    def queue_pages_for_refresh(self, start_url):
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT OR IGNORE INTO url_queue(start_url, url, status)
+                   SELECT start_url, url, 'queued' FROM pages WHERE start_url=?""",
+                (start_url,),
+            )
+            self._connection.execute(
+                """UPDATE url_queue SET status='queued', error=NULL
+                   WHERE start_url=? AND EXISTS (
+                       SELECT 1 FROM pages
+                       WHERE pages.start_url=url_queue.start_url
+                         AND pages.url=url_queue.url
+                   )""",
+                (start_url,),
+            )
+
+    def page_cache(self, start_url, url):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT html, etag, last_modified FROM pages WHERE start_url=? AND url=?",
+                (start_url, url),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"html": row[0], "etag": row[1], "last_modified": row[2]}
+
+    def mark_page_unchanged(self, start_url, url, validators):
+        with self._lock, self._connection:
+            self._connection.execute(
+                """UPDATE pages SET etag=COALESCE(?, etag),
+                       last_modified=COALESCE(?, last_modified)
+                   WHERE start_url=? AND url=?""",
+                (validators.get("etag"), validators.get("last_modified"), start_url, url),
+            )
+            self._connection.execute(
+                "UPDATE url_queue SET status='done', error=NULL WHERE start_url=? AND url=?",
+                (start_url, url),
+            )
+
     def save_page(self, start_url, page, discovered_urls):
         self.save_pages(start_url, [(page, discovered_urls)])
 
@@ -223,10 +276,12 @@ class CrawlDatabase:
                 for page, discovered_urls in page_results:
                     self._connection.execute(
                         """INSERT INTO pages
-                        (start_url, url, url_hash, title, published_at, content, html, crawler_name,
-                            links_json, images_json, crawled_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        (start_url, url, url_hash, etag, last_modified, title, published_at,
+                            content, html, crawler_name, links_json, images_json, crawled_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(start_url, url) DO UPDATE SET
+                            etag=excluded.etag,
+                            last_modified=excluded.last_modified,
                             title=excluded.title,
                             url_hash=excluded.url_hash,
                             published_at=excluded.published_at,
@@ -240,6 +295,8 @@ class CrawlDatabase:
                             start_url,
                             page["url"],
                             self.page_url_hash(page["url"]),
+                            page.get("etag"),
+                            page.get("last_modified"),
                             page["title"],
                             page.get("published_at"),
                             page.get("content"),

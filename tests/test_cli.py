@@ -10,6 +10,43 @@ import cli
 
 
 class CliTests(unittest.TestCase):
+    def test_export_excel_does_not_start_a_crawl(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(json.dumps({
+                "start_urls": ["https://example.org"],
+                "max_pages": 25,
+                "workers": 2,
+                "delay": 0,
+                "timeout": 5,
+                "retries": 1,
+                "max_response_bytes": 1024,
+                "database_file": "crawl.db",
+                "images_dir": "img",
+                "log_file": "crawler.jsonl",
+            }), encoding="utf-8")
+
+            with (
+                patch("cli.export_database_to_excel", return_value={
+                    "pages": 10,
+                    "images": 5,
+                    "documents": 2,
+                }) as export,
+                patch("cli.Crawler") as crawler_class,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                cli.main([
+                    "--config", str(config_path),
+                    "--export-excel", "export.xlsx",
+                ])
+
+        export.assert_called_once_with(
+            config_path.parent / "crawl.db",
+            config_path.parent / "export.xlsx",
+        )
+        crawler_class.assert_not_called()
+        self.assertIn("10 pages, 5 images, 2 documents", output.getvalue())
+
     def test_runtime_options_override_config_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.json"
@@ -48,6 +85,7 @@ class CliTests(unittest.TestCase):
                     "--max-pages", "12",
                     "--workers", "3",
                     "--retries", "0",
+                    "--refresh",
                 ])
 
         self.assertEqual(len(crawler_class.call_args_list), 2)
@@ -55,6 +93,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(call.kwargs["max_pages"], 12)
             self.assertEqual(call.kwargs["workers"], 3)
             self.assertEqual(call.kwargs["retries"], 0)
+            self.assertTrue(call.kwargs["refresh"])
 
     def test_rejects_invalid_runtime_limits(self):
         for option, value in (

@@ -1,11 +1,13 @@
 import argparse
 import json
 import logging
+from pathlib import Path
 
 from urllib.error import HTTPError, URLError
 
 from crawler import Crawler, CrawlDatabase
 from crawler.config import DEFAULT_CONFIG_PATH, load_config
+from crawler.excel_export import export_database_to_excel
 from crawler.logging_setup import configure_logging
 
 
@@ -35,7 +37,7 @@ def main(argv=None):
     cli.add_argument(
         "--max-pages",
         type=_positive_int,
-        help="Nombre maximal de nouvelles pages par site (remplace la configuration)",
+        help="Nombre maximal de pages traitées par site (remplace la configuration)",
     )
     cli.add_argument(
         "--workers",
@@ -47,10 +49,35 @@ def main(argv=None):
         type=_non_negative_int,
         help="Nombre de retries après l’essai initial (remplace la configuration)",
     )
+    cli.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Vérifie si les pages déjà enregistrées ont changé",
+    )
+    cli.add_argument(
+        "--export-excel",
+        metavar="PATH",
+        help="Exporte pages, images et documents en Excel sans lancer de crawl",
+    )
     args = cli.parse_args(argv)
 
     try:
         config = load_config(args.config)
+        if args.export_excel:
+            output_path = Path(args.export_excel)
+            if not output_path.is_absolute():
+                output_path = config["database_path"].parent / output_path
+            counts = export_database_to_excel(
+                config["database_path"],
+                output_path,
+            )
+            print(
+                f"Export Excel créé : {output_path.resolve()} "
+                f"({counts['pages']} pages, {counts['images']} images, "
+                f"{counts['documents']} documents)."
+            )
+            return
+
         for option in ("max_pages", "workers", "retries"):
             value = getattr(args, option)
             if value is not None:
@@ -72,6 +99,7 @@ def main(argv=None):
                     documents_dir=config["documents_path"],
                     crawler_name=config["crawler_name"],
                     database_flush_interval=config["database_flush_interval"],
+                    refresh=args.refresh,
                     database=database,
                 )
                 for start_url in config["start_urls"]
@@ -80,11 +108,20 @@ def main(argv=None):
             results = Crawler.crawl_many(crawlers)
             summary = database.summary()
         new_page_count = sum(len(result["pages"]) for result in results)
+        unchanged_page_count = sum(
+            result.get("unchanged_pages", 0) for result in results
+        )
         new_image_count = summary["images"] - previous_summary["images"]
         new_document_count = summary["documents"] - previous_summary["documents"]
+        page_summary = (
+            f"{new_page_count} pages nouvelles ou actualisées, "
+            f"{unchanged_page_count} inchangées"
+            if args.refresh
+            else f"{new_page_count} nouvelles pages"
+        )
         print(
             "Crawl terminé : "
-            f"{new_page_count} nouvelles pages "
+            f"{page_summary} "
             f"({summary['pages']} au total), "
             f"{new_image_count} nouvelles images ({summary['images']} au total), "
             f"{new_document_count} nouveaux documents ({summary['documents']} au total)."

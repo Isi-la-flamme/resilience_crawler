@@ -18,7 +18,7 @@ class ImageDownloader:
 
     def download(self, url):
         self.before_request(url)
-        body, content_type, _ = self.fetcher.fetch(url, retries=self.retries)
+        body, content_type, _, _ = self.fetcher.fetch(url, retries=self.retries)
         if not content_type.startswith("image/"):
             raise ValueError(f"Ressource non image ({content_type}) : {url}")
 

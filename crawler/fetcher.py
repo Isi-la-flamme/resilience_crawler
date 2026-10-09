@@ -19,12 +19,15 @@ class Fetcher:
         self.max_response_bytes = max_response_bytes
         self.user_agent = user_agent
 
-    def fetch(self, url, retries=2):
+    def fetch(self, url, retries=2, headers=None):
         with metrics.measure("fetch"):
                 
             for attempt in range(retries + 1):
                 logger.info("FETCH start %s (attempt %d/%d)", url, attempt + 1, retries + 1)
-                request = Request(url, headers={"User-Agent": self.user_agent})
+                request_headers = {"User-Agent": self.user_agent}
+                if headers:
+                    request_headers.update(headers)
+                request = Request(url, headers=request_headers)
                 try:
                     with urlopen(request, timeout=self.timeout) as response:
                         content_length = response.headers.get("Content-Length")
@@ -51,8 +54,13 @@ class Fetcher:
                                 )
 
                         logger.info("FETCH OK %s (%d bytes, %s)", url, len(body), content_type)
-                        return bytes(body), content_type, charset
+                        return bytes(body), content_type, charset, self._validators(response.headers)
                 except HTTPError as error:
+                    if error.code == 304:
+                        validators = self._validators(error.headers)
+                        error.close()
+                        logger.info("FETCH unchanged %s (HTTP 304)", url)
+                        return None, None, None, validators
                     if error.code in {404, 410}:
                         logger.info("HTTP %s for %s", error.code, url)
                     else:
@@ -70,3 +78,10 @@ class Fetcher:
                 time.sleep(2 ** attempt)
 
             raise RuntimeError(f"Impossible de récupérer {url}")
+
+    @staticmethod
+    def _validators(headers):
+        return {
+            "etag": headers.get("ETag"),
+            "last_modified": headers.get("Last-Modified"),
+        }

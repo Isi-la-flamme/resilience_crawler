@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import wait as wait_for_futures
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -13,6 +14,9 @@ from crawler import Crawler, CrawlDatabase
 
 class TestHandler(BaseHTTPRequestHandler):
     transient_requests = 0
+    conditional_version = "1"
+    conditional_request_headers = []
+    excluded_route_requests = []
     missing_get_requests = 0
     missing_head_requests = 0
     head_requests = 0
@@ -23,6 +27,10 @@ class TestHandler(BaseHTTPRequestHandler):
     slow_lock = threading.Lock()
 
     def do_GET(self):
+        final_path_segment = self.path.rstrip("/").rsplit("/", 1)[-1].lower()
+        if final_path_segment in {"pricing", "token"}:
+            type(self).excluded_route_requests.append(self.path)
+
         if self.path == "/robots.txt":
             self.respond(200, "User-agent: *\nDisallow: /private\n")
         elif self.path == "/missing":
@@ -45,6 +53,36 @@ class TestHandler(BaseHTTPRequestHandler):
             self.respond(status, "<title>Récupérée</title>")
         elif self.path == "/large":
             self.respond(200, "<title>" + ("a" * 100) + "</title>")
+        elif self.path == "/conditional":
+            type(self).conditional_request_headers.append(
+                self.headers.get("If-None-Match")
+            )
+            etag = f'"v{type(self).conditional_version}"'
+            if self.headers.get("If-None-Match") == etag:
+                self.send_response(304)
+                self.end_headers()
+            else:
+                body = (
+                    f"<title>Version {type(self).conditional_version}</title>"
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("ETag", etag)
+                self.send_header("Last-Modified", "Fri, 09 Oct 2026 00:00:00 GMT")
+                self.end_headers()
+                self.wfile.write(body)
+        elif self.path == "/junk-route-root":
+            self.respond(
+                200,
+                '<a href="/article/token/">Token</a>'
+                '<a href="/article/pricing/">Pricing</a>'
+                '<a href="/category/actualite/audience/page/4/pricing//pricing">'
+                'Nested pricing</a>'
+                '<a href="/article/normal">Normal</a>',
+            )
+        elif self.path == "/article/normal":
+            self.respond(200, "<title>Normal</title>")
         elif self.path == "/queue-root":
             self.respond(200, '<a href="/queue-a">A</a><a href="/queue-b">B</a>')
         elif self.path == "/queue-a":
@@ -266,6 +304,93 @@ class CrawlerTests(unittest.TestCase):
             & {page["url"] for page in second["pages"]}
         )
 
+    def test_refresh_uses_conditional_requests_and_updates_changed_pages(self):
+        TestHandler.conditional_version = "1"
+        TestHandler.conditional_request_headers = []
+        start_url = self.base_url + "/conditional"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                first = self.make_crawler(
+                    "/conditional",
+                    database=database,
+                ).crawl()
+                first_page = database.page_cache(start_url, start_url)
+                unchanged = self.make_crawler(
+                    "/conditional",
+                    database=database,
+                    refresh=True,
+                ).crawl()
+                etag_after_304 = database.page_cache(start_url, start_url)["etag"]
+
+                TestHandler.conditional_version = "2"
+                changed = self.make_crawler(
+                    "/conditional",
+                    database=database,
+                    refresh=True,
+                ).crawl()
+                stored_title = database._connection.execute(
+                    "SELECT title FROM pages WHERE start_url=? AND url=?",
+                    (start_url, start_url),
+                ).fetchone()[0]
+
+        self.assertEqual(first["pages"][0]["title"], "Version 1")
+        self.assertEqual(first_page["etag"], '"v1"')
+        self.assertEqual(etag_after_304, '"v1"')
+        self.assertEqual(unchanged["pages"], [])
+        self.assertEqual(unchanged["unchanged_pages"], 1)
+        self.assertEqual(changed["pages"][0]["title"], "Version 2")
+        self.assertEqual(stored_title, "Version 2")
+        self.assertEqual(
+            TestHandler.conditional_request_headers,
+            [None, '"v1"', '"v1"'],
+        )
+
+    def test_skips_token_and_pricing_routes_at_discovery_and_queue(self):
+        TestHandler.excluded_route_requests = []
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                start_url = self.base_url + "/junk-route-root"
+                excluded_urls = [
+                    self.base_url + "/article/token/",
+                    self.base_url + "/article/pricing/",
+                    self.base_url
+                    + "/category/actualite/audience/page/4/pricing//pricing",
+                ]
+                database.enqueue(start_url, excluded_urls)
+                result = self.make_crawler(
+                    "/junk-route-root",
+                    database=database,
+                ).crawl()
+                statuses = dict(database._connection.execute(
+                    "SELECT url, status FROM url_queue WHERE start_url=?",
+                    (start_url,),
+                ).fetchall())
+
+        self.assertEqual(
+            [page["url"] for page in result["pages"]],
+            [
+                self.base_url + "/junk-route-root",
+                self.base_url + "/article/normal",
+            ],
+        )
+        self.assertEqual(TestHandler.excluded_route_requests, [])
+        self.assertEqual(
+            statuses[self.base_url + "/article/token/"],
+            "skipped",
+        )
+        self.assertEqual(
+            statuses[self.base_url + "/article/pricing/"],
+            "skipped",
+        )
+        self.assertEqual(
+            statuses[
+                self.base_url
+                + "/category/actualite/audience/page/4/pricing//pricing"
+            ],
+            "skipped",
+        )
+
     def test_retries_transient_server_error(self):
         TestHandler.transient_requests = 0
         result = self.make_crawler("/temporary", retries=1).crawl()
@@ -454,6 +579,41 @@ class CrawlerTests(unittest.TestCase):
 
         self.assertEqual([len(result["pages"]) for result in results], [4, 3])
         self.assertGreaterEqual(TestHandler.slow_max_active, 2)
+
+    def test_graceful_interrupt_saves_completed_pages_and_resumes_queue(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "crawl.db"
+            start_url = self.base_url + "/parallel"
+            crawler = self.make_crawler(
+                "/parallel",
+                database=CrawlDatabase(database_path),
+                workers=2,
+            )
+            original_wait = wait_for_futures
+            interrupted = False
+
+            def interrupt_once(*args, **kwargs):
+                nonlocal interrupted
+                if not interrupted:
+                    interrupted = True
+                    raise KeyboardInterrupt
+                return original_wait(*args, **kwargs)
+
+            try:
+                with patch("crawler.engine.wait", side_effect=interrupt_once):
+                    with self.assertRaises(KeyboardInterrupt):
+                        crawler.crawl()
+                crawler.database.close()
+
+                with CrawlDatabase(database_path) as database:
+                    self.assertEqual(database.page_count(start_url), 1)
+                    self.assertEqual(
+                        database.claim_next(start_url),
+                        self.base_url + "/slow/one",
+                    )
+            finally:
+                if crawler.database._connection:
+                    crawler.database.close()
 
     def test_flushes_completed_pages_at_configured_interval(self):
         with tempfile.TemporaryDirectory() as temp_dir:
