@@ -9,13 +9,53 @@ from crawler.config import DEFAULT_CONFIG_PATH, load_config
 from crawler.logging_setup import configure_logging
 
 
-def main():
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("doit être un entier positif.") from error
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("doit être un entier positif.")
+    return parsed
+
+
+def _non_negative_int(value):
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("doit être un entier positif ou nul.") from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("doit être un entier positif ou nul.")
+    return parsed
+
+
+def main(argv=None):
     cli = argparse.ArgumentParser(description="Explore les URL définies dans config.json.")
     cli.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Chemin du fichier de configuration")
-    args = cli.parse_args()
+    cli.add_argument(
+        "--max-pages",
+        type=_positive_int,
+        help="Nombre maximal de nouvelles pages par site (remplace la configuration)",
+    )
+    cli.add_argument(
+        "--workers",
+        type=_positive_int,
+        help="Nombre de workers (remplace la configuration)",
+    )
+    cli.add_argument(
+        "--retries",
+        type=_non_negative_int,
+        help="Nombre de retries après l’essai initial (remplace la configuration)",
+    )
+    args = cli.parse_args(argv)
 
     try:
         config = load_config(args.config)
+        for option in ("max_pages", "workers", "retries"):
+            value = getattr(args, option)
+            if value is not None:
+                config[option] = value
+
         log_handlers = configure_logging(config)
         with CrawlDatabase(config["database_path"]) as database:
             crawlers = [

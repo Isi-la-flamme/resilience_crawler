@@ -244,7 +244,7 @@ class CrawlerTests(unittest.TestCase):
     def test_resumes_from_saved_queue_with_page_limit_per_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
-                with patch("crawler.metrics.dump"):
+                with patch("crawler.engine.metrics.dump"):
                     first = self.make_crawler(
                         "/queue-root",
                         database=database,

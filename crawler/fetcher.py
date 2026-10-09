@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
+class ResponseTooLargeError(ValueError):
+    pass
+
+
 class Fetcher:
     def __init__(self, timeout=10, max_response_bytes=5 * 1024 * 1024, user_agent=USER_AGENT):
         self.timeout = timeout
@@ -23,20 +27,28 @@ class Fetcher:
                 request = Request(url, headers={"User-Agent": self.user_agent})
                 try:
                     with urlopen(request, timeout=self.timeout) as response:
+                        content_length = response.headers.get("Content-Length")
+                        if content_length is not None and int(content_length) > self.max_response_bytes:
+                            raise ResponseTooLargeError(
+                                f"Réponse supérieure à la limite de "
+                                f"{self.max_response_bytes} octets."
+                            )
+
                         content_type = response.headers.get_content_type()
                         charset = response.headers.get_content_charset() or "utf-8"
 
                         body = bytearray()
                         while True:
-                            remaining = self.max_response_bytes - len(body)
-                            if remaining <= 0:
-                                raise ValueError(f"Réponse supérieure à la limite de {self.max_response_bytes} octets.")
+                            remaining = self.max_response_bytes + 1 - len(body)
                             chunk = response.read(min(65536, remaining))
                             if not chunk:
                                 break
                             body.extend(chunk)
                             if len(body) > self.max_response_bytes:
-                                raise ValueError(f"Réponse supérieure à la limite de {self.max_response_bytes} octets.")
+                                raise ResponseTooLargeError(
+                                    f"Réponse supérieure à la limite de "
+                                    f"{self.max_response_bytes} octets."
+                                )
 
                         logger.info("FETCH OK %s (%d bytes, %s)", url, len(body), content_type)
                         return bytes(body), content_type, charset
@@ -48,6 +60,9 @@ class Fetcher:
                     error.close()
                     if error.code not in RETRYABLE_STATUS_CODES or attempt == retries:
                         raise
+                except ResponseTooLargeError as error:
+                    logger.warning("FETCH skipped for %s: %s", url, error)
+                    raise
                 except (URLError, TimeoutError, OSError, ValueError) as error:
                     logger.warning("FETCH failed for %s: %s", url, error)
                     if attempt == retries:
