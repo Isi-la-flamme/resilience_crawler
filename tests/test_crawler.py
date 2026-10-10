@@ -312,6 +312,39 @@ class CrawlerTests(unittest.TestCase):
         finally:
             crawler.database.close()
 
+    def test_resolves_bare_in_scope_hostname_href_to_root_url(self):
+        crawler = Crawler("https://example.com/", sleep=lambda _: None)
+        try:
+            self.assertEqual(
+                crawler._normalize_resources(
+                    "https://example.com/article/",
+                    ["www.example.com"],
+                    same_scope=True,
+                ),
+                ["https://www.example.com/"],
+            )
+        finally:
+            crawler.database.close()
+
+    def test_skips_previous_malformed_queue_url_ending_with_host(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            start_url = self.base_url + "/next"
+            malformed_url = start_url + "/127.0.0.1"
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                database.enqueue(start_url, [malformed_url])
+                result = self.make_crawler(
+                    "/next",
+                    database=database,
+                ).crawl()
+                malformed_status = database._connection.execute(
+                    "SELECT status FROM url_queue WHERE start_url=? AND url=?",
+                    (start_url, malformed_url),
+                ).fetchone()[0]
+
+        self.assertEqual([page["url"] for page in result["pages"]], [start_url])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(malformed_status, "skipped")
+
     def test_does_not_follow_redirect_outside_configured_domain(self):
         TestHandler.out_of_scope_redirect_target_requests = 0
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -650,6 +683,31 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual(page["downloaded_images"], [])
         self.assertEqual(image_count, 0)
         self.assertFalse((Path(temp_dir) / "img").exists())
+
+    def test_no_html_still_follows_links_and_downloads_images_without_storing_pages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_url = self.base_url + "/test-image.png"
+            start_url = self.base_url + "/with-image"
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                result = self.make_crawler(
+                    "/with-image",
+                    database=database,
+                    image_dir=Path(temp_dir) / "img",
+                    download_html=False,
+                ).crawl()
+                page_count = database.page_count(start_url)
+                queue_status = database._connection.execute(
+                    "SELECT status FROM url_queue WHERE start_url=? AND url=?",
+                    (start_url, start_url),
+                ).fetchone()[0]
+                image_count = database.summary()["images"]
+                image_exists = database.image_path(image_url) is not None
+
+        self.assertEqual(result["pages"], [])
+        self.assertEqual(page_count, 0)
+        self.assertEqual(queue_status, "done")
+        self.assertEqual(image_count, 1)
+        self.assertTrue(image_exists)
 
     def test_downloads_images_in_configured_batches(self):
         TestHandler.image_max_active = 0

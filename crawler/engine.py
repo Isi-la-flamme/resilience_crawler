@@ -62,6 +62,7 @@ class Crawler:
         fetcher=None,
         database=None,
         refresh=False,
+        download_html=True,
         download_images=True,
         download_documents=True,
     ):
@@ -85,6 +86,8 @@ class Crawler:
             database: Base partagée facultative. Si omise, une base mémoire est
                 créée et fermée par ce crawler.
             refresh: Revalide les pages déjà enregistrées à l'aide des validateurs HTTP.
+            download_html: Enregistre les pages HTML si vrai. Le HTML est
+                toujours analysé pour découvrir les liens et les ressources.
             download_images: Télécharge et stocke les images trouvées si vrai.
             download_documents: Télécharge et stocke les documents reconnus si vrai.
 
@@ -112,6 +115,7 @@ class Crawler:
         self.crawler_name = crawler_name
         self.database_flush_interval = database_flush_interval
         self.refresh = refresh
+        self.download_html = download_html
         self.download_images = download_images
         self.download_documents = download_documents
         self.sleep = sleep
@@ -273,7 +277,7 @@ class Crawler:
             crawler = state["crawler"]
             page_count = (
                 state["processed_count"]
-                if crawler.refresh
+                if crawler.refresh or not crawler.download_html
                 else len(state["pages"])
             )
             if page_count + state["active_count"] >= crawler.max_pages:
@@ -292,6 +296,11 @@ class Crawler:
             except ValueError:
                 crawler.database.set_url_status(crawler.start_url, url, "skipped")
                 logger.info("Ignoring out-of-scope URL: %s", url)
+                continue
+
+            if crawler._has_bare_host_path(url):
+                crawler.database.set_url_status(crawler.start_url, url, "skipped")
+                logger.info("Ignoring malformed URL ending in bare host: %s", url)
                 continue
 
             if crawler._is_excluded_url(url):
@@ -396,6 +405,16 @@ class Crawler:
                 continue
 
             crawler.database.enqueue(crawler.start_url, discovered_urls)
+            if not crawler.download_html:
+                crawler.database.set_url_status(crawler.start_url, url, "done")
+                state["processed_count"] += 1
+                logger.info(
+                    "PAGE analyzed but not stored: %s (links=%d images=%d)",
+                    url,
+                    len(page["links"]),
+                    len(page["images"]),
+                )
+                continue
             state["pending_pages"].append((page, discovered_urls))
             state["pages"].append(page)
             logger.info(
@@ -629,10 +648,21 @@ class Crawler:
         normalized_urls = []
         for resource in resources:
             try:
-                url = self._normalize_url(
-                    urljoin(page_url, resource),
-                    same_scope=same_scope,
-                )
+                raw_resource = resource.strip()
+                bare_host = raw_resource.rstrip("/")
+                if (
+                    bare_host
+                    and "/" not in bare_host
+                    and "?" not in bare_host
+                    and "#" not in bare_host
+                    and self._is_in_scope_url(
+                        f"{urlsplit(page_url).scheme}://{bare_host}/"
+                    )
+                ):
+                    resolved_url = f"{urlsplit(page_url).scheme}://{bare_host}/"
+                else:
+                    resolved_url = urljoin(page_url, raw_resource)
+                url = self._normalize_url(resolved_url, same_scope=same_scope)
             except ValueError:
                 logger.debug("Ignoring unsupported or out-of-scope URL: %s", resource)
                 continue
@@ -642,6 +672,11 @@ class Crawler:
             if url not in normalized_urls:
                 normalized_urls.append(url)
         return normalized_urls
+
+    def _has_bare_host_path(self, url):
+        """Indique si un chemin finit par l'hôte, signe d'un href nu mal résolu."""
+        final_segment = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+        return final_segment.lower() == self.scope_host
 
     @staticmethod
     def _is_excluded_url(url):

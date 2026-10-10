@@ -1,8 +1,8 @@
 start_urls:
-  - https://www.presidencedufaso.bf/
+  - https://gouvernement.gov.bf/
 
    
-max_pages: 25
+max_pages: 500
 workers: 8
 delay: 0.5
 image_batch_size: 1

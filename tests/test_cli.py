@@ -85,6 +85,73 @@ class CliTests(unittest.TestCase):
 
         self.assertFalse(crawler_class.call_args.kwargs["download_images"])
 
+    def test_no_html_flag_disables_page_storage(self):
+        config = {
+            "start_urls": ["https://configured.example/"],
+            "max_pages": 25,
+            "workers": 2,
+            "delay": 0,
+            "timeout": 5,
+            "retries": 1,
+            "max_response_bytes": 1024,
+            "database_path": Path("crawl.db"),
+            "images_path": Path("img"),
+            "documents_path": Path("documents"),
+            "log_path": Path("crawler.jsonl"),
+            "crawler_name": "Test",
+            "database_flush_interval": 30,
+            "image_batch_size": 1,
+        }
+        with (
+            patch("cli.load_config", return_value=config),
+            patch("cli.configure_logging", return_value=[]),
+            patch("cli.CrawlDatabase") as database_class,
+            patch("cli.Crawler") as crawler_class,
+        ):
+            database = database_class.return_value.__enter__.return_value
+            database.queued_start_urls.return_value = []
+            database.ensure_start_url_queued.return_value = 0
+            database.summary.return_value = {
+                "pages": 0,
+                "images": 0,
+                "documents": 0,
+            }
+            crawler_class.crawl_many.return_value = [{"pages": []}]
+
+            cli.main(["--config", "--no-html"])
+
+        self.assertFalse(crawler_class.call_args.kwargs["download_html"])
+
+    def test_disabling_all_content_types_is_reported_before_crawl(self):
+        config = {
+            "start_urls": ["https://configured.example/"],
+            "max_pages": 25,
+            "workers": 2,
+            "delay": 0,
+            "timeout": 5,
+            "retries": 1,
+            "max_response_bytes": 1024,
+            "database_path": Path("crawl.db"),
+            "images_path": Path("img"),
+            "documents_path": Path("documents"),
+            "log_path": Path("crawler.jsonl"),
+            "crawler_name": "Test",
+            "database_flush_interval": 30,
+            "image_batch_size": 1,
+        }
+        with (
+            patch("cli.load_config", return_value=config),
+            patch("cli.configure_logging", return_value=[]),
+            patch("cli.CrawlDatabase") as database_class,
+            contextlib.redirect_stderr(io.StringIO()) as error_output,
+        ):
+            with self.assertRaises(SystemExit) as exit_info:
+                cli.main(["--config", "--no-html", "--no-images", "--no-documents"])
+
+        self.assertEqual(exit_info.exception.code, 2)
+        self.assertIn("réactivez au moins un type de contenu", error_output.getvalue())
+        database_class.assert_not_called()
+
     def test_no_documents_flag_disables_document_downloads(self):
         config = {
             "start_urls": ["https://configured.example/"],

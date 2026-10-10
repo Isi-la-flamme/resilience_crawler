@@ -14,6 +14,9 @@ class PublicApiTests(unittest.TestCase):
         root = Path(self.temp_dir.name)
         self.pages_database = root / "pages.db"
         self.pdf_database = root / "pdf.db"
+        self.crawl_database = root / "crawl.db"
+        self.images_directory = root / "img"
+        self.images_directory.mkdir()
 
         pages = sqlite3.connect(self.pages_database)
         pages.executescript("""
@@ -68,7 +71,62 @@ class PublicApiTests(unittest.TestCase):
         """)
         documents.close()
 
-        self.client = TestClient(create_app(self.pages_database, self.pdf_database))
+        crawl = sqlite3.connect(self.crawl_database)
+        crawl.executescript("""
+            CREATE TABLE pages (
+                start_url TEXT NOT NULL,
+                url TEXT NOT NULL,
+                title TEXT NOT NULL,
+                images_json TEXT NOT NULL
+            );
+            CREATE TABLE images (
+                url TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                local_path TEXT,
+                error TEXT
+            );
+        """)
+        self.image_file = self.images_directory / "logo.png"
+        self.image_file.write_bytes(b"local-image")
+        missing_file = self.images_directory / "missing.png"
+        outside_file = root / "outside.png"
+        outside_file.write_bytes(b"outside")
+        crawl.executemany(
+            "INSERT INTO images(url,status,local_path) VALUES(?,?,?)",
+            [
+                ("https://example.org/logo.png", "downloaded", str(self.image_file)),
+                ("https://example.org/missing.png", "downloaded", str(missing_file)),
+                ("https://example.org/outside.png", "downloaded", str(outside_file)),
+                ("https://other.example/logo.png", "downloaded", str(self.image_file)),
+            ],
+        )
+        crawl.executemany(
+            "INSERT INTO pages VALUES(?,?,?,?)",
+            [
+                (
+                    "https://example.org/",
+                    "https://example.org/budget",
+                    "Budget 2026",
+                    '["https://example.org/logo.png","https://example.org/missing.png",'
+                    '"https://example.org/outside.png"]',
+                ),
+                (
+                    "https://other.example/",
+                    "https://other.example/",
+                    "Other site",
+                    '["https://other.example/logo.png"]',
+                ),
+            ],
+        )
+        crawl.commit()
+        crawl.close()
+
+        self.client = TestClient(create_app(
+            self.pages_database,
+            self.pdf_database,
+            self.crawl_database,
+            self.images_directory,
+        ))
 
     def tearDown(self):
         self.client.close()
@@ -86,9 +144,44 @@ class PublicApiTests(unittest.TestCase):
         self.assertIn("item.source_url || item.url", dashboard.text)
         self.assertIn("Lire le texte intégral", dashboard.text)
         self.assertIn("fetch(`/api/v1/${detailKind}/${item.id}`)", dashboard.text)
+        self.assertIn('data-kind="images"', dashboard.text)
+        self.assertIn('id="image-viewer"', dashboard.text)
         self.assertNotIn('link.target = "_blank"', dashboard.text)
         self.assertEqual(health.json()["status"], "ok")
         self.assertEqual(health.json()["rights_status"], "not_assessed")
+
+    def test_image_gallery_lists_only_local_files_and_filters_by_site(self):
+        response = self.client.get("/api/v1/images?site=example.org")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["total"], 1)
+        self.assertEqual(data["items"][0]["title"], "Budget 2026")
+        self.assertEqual(data["items"][0]["image_url"], "https://example.org/logo.png")
+        self.assertNotIn("local_path", data["items"][0])
+
+    def test_image_file_endpoint_serves_local_image_only(self):
+        response = self.client.get(
+            "/api/v1/images/file",
+            params={"url": "https://example.org/logo.png"},
+        )
+        missing = self.client.get(
+            "/api/v1/images/file",
+            params={"url": "https://example.org/outside.png"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"local-image")
+        self.assertEqual(missing.status_code, 404)
+
+    def test_image_gallery_is_unavailable_without_local_database_configuration(self):
+        client = TestClient(create_app(self.pages_database, self.pdf_database))
+        try:
+            response = client.get("/api/v1/images")
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 503)
 
     def test_sites_pages_search_pagination_and_rights_notice(self):
         sites = self.client.get("/api/v1/sites")
@@ -112,6 +205,60 @@ class PublicApiTests(unittest.TestCase):
             "https://example.org/budget",
         )
         self.assertEqual(pages.json()["items"][0]["rights_status"], "not_assessed")
+
+    def test_search_can_match_a_substring_or_a_whole_word(self):
+        pages = sqlite3.connect(self.pages_database)
+        pages.execute(
+            "UPDATE pages SET title='Facture charge', cleaned_text='La charge publique.' WHERE id=1"
+        )
+        pages.commit()
+        pages.close()
+
+        documents = sqlite3.connect(self.pdf_database)
+        documents.execute(
+            "UPDATE documents SET title='Facture charge', extracted_text='La charge publique.' WHERE id=1"
+        )
+        documents.execute(
+            "UPDATE pdf_search SET title='Facture charge', extracted_text='La charge publique.' "
+            "WHERE rowid=1"
+        )
+        documents.commit()
+        documents.close()
+
+        crawl = sqlite3.connect(self.crawl_database)
+        crawl.execute(
+            "UPDATE pages SET title='Facture charge' WHERE start_url='https://example.org/'"
+        )
+        crawl.commit()
+        crawl.close()
+
+        for resource in ("pages", "documents", "images"):
+            partial = self.client.get(
+                f"/api/v1/{resource}",
+                params={"q": "char", "match_mode": "contains"},
+            )
+            whole_partial = self.client.get(
+                f"/api/v1/{resource}",
+                params={"q": "char", "match_mode": "whole"},
+            )
+            whole_word = self.client.get(
+                f"/api/v1/{resource}",
+                params={"q": "charge", "match_mode": "whole"},
+            )
+
+            self.assertEqual(partial.status_code, 200)
+            self.assertGreaterEqual(partial.json()["total"], 1, resource)
+            self.assertEqual(whole_partial.json()["total"], 0, resource)
+            self.assertGreaterEqual(whole_word.json()["total"], 1, resource)
+            self.assertEqual(whole_word.json()["match_mode"], "whole")
+
+    def test_search_mode_rejects_unknown_values(self):
+        response = self.client.get(
+            "/api/v1/pages",
+            params={"q": "char", "match_mode": "prefix"},
+        )
+
+        self.assertEqual(response.status_code, 422)
 
     def test_page_search_excerpt_is_centered_on_the_match(self):
         pages = sqlite3.connect(self.pages_database)

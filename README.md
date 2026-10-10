@@ -34,8 +34,8 @@ réutilisés.** Le statut des droits est actuellement `not_assessed` (« non
   conditionnels lorsque le serveur les fournit.
 - Exclusion des URL dont le dernier segment du chemin est `pricing` ou `token`,
   à la découverte par le crawler et dans les résultats de l’API.
-- Téléchargement des images (`--no-images`) et documents (`--no-documents`)
-  désactivable indépendamment.
+- Enregistrement des pages HTML, images et documents désactivable
+  indépendamment avec `--no-html`, `--no-images` et `--no-documents`.
 - Export Excel des pages, images et documents.
 - Nettoyage du HTML en texte brut, avec exclusion des éléments non éditoriaux
   et détection de blocs répétitifs par site.
@@ -188,11 +188,15 @@ les reprises après la tentative initiale. Vérifier les règles d’accès des 
 et choisir une cadence raisonnable avant toute collecte.
 L’option `--no-images` désactive les téléchargements d’images pour ce lancement ;
 les URL des images restent extraites et enregistrées avec les pages.
+L’option `--no-html` évite l’enregistrement des pages HTML. Le crawler les
+analyse tout de même afin de découvrir les liens, images et documents à traiter.
 L’option `--no-documents` évite le téléchargement et le stockage des documents
 reconnus pour ce lancement. Les URL documentaires identifiées par leur extension
 sont ignorées avant la requête ; si le document n’est reconnaissable qu’au type
 MIME, le crawler s’arrête après les en-têtes HTTP, sans lire le corps. Ces URL
 passent à l’état `skipped` et ne seront pas reprises automatiquement.
+Au moins un type de contenu doit rester activé ; désactiver simultanément HTML,
+images et documents affiche une erreur claire avant le démarrage de la collecte.
 
 Une URL qui échoue après les retries configurés garde le statut `failed` et
 n’est pas remise en attente automatiquement au prochain lancement. Pour
@@ -229,6 +233,9 @@ Chaque `start_url` définit sa portée : son domaine et ses sous-domaines sont
 crawlés ; les autres domaines doivent être explicitement ajoutés au YAML. Les
 liens et images externes, y compris ceux déjà présents dans la file SQLite,
 sont ignorés. Les redirections HTTP hors de cette portée sont refusées.
+Les liens écrits comme un nom d’hôte nu (par exemple `www.exemple.bf` sans
+schéma) sont résolus vers la racine du site, et les anciens chemins mal formés
+qui se terminent par ce nom d’hôte sont ignorés.
 
 Si la file d’un site a été supprimée mais que ses pages restent en base,
 l’initialisation reconstruit la file depuis les liens sauvegardés de ces pages.
@@ -351,17 +358,21 @@ définis dans PowerShell avant le démarrage :
 ```powershell
 $env:OPENDATA_PAGES_DB = "C:\data\crawl-clean.db"
 $env:OPENDATA_PDF_DB = "C:\data\pdf-index.db"
+$env:OPENDATA_CRAWL_DB = "C:\data\crawl.db"
+$env:OPENDATA_IMAGES_DIR = "C:\data\img"
 $env:OPENDATA_HOST = "127.0.0.1"
 $env:OPENDATA_PORT = "8000"
 .\.venv\Scripts\python.exe api.py
 ```
 
-Si les variables de base ne sont pas définies, l’API utilise `crawl-clean.db`
-et `pdf-index.db` dans le dossier du projet. Pour supprimer les variables de la
-session PowerShell :
+Si ces variables ne sont pas définies, l’API utilise `crawl-clean.db`,
+`pdf-index.db`, `crawl.db` et `img/` dans le dossier du projet. La galerie
+utilise uniquement les images téléchargées présentes dans `img/`, référencées
+par la base du crawler ; elle ne récupère jamais une image depuis son site
+d’origine. Pour supprimer les variables de la session PowerShell :
 
 ```powershell
-Remove-Item Env:OPENDATA_PAGES_DB, Env:OPENDATA_PDF_DB, Env:OPENDATA_HOST, Env:OPENDATA_PORT -ErrorAction SilentlyContinue
+Remove-Item Env:OPENDATA_PAGES_DB, Env:OPENDATA_PDF_DB, Env:OPENDATA_CRAWL_DB, Env:OPENDATA_IMAGES_DIR, Env:OPENDATA_HOST, Env:OPENDATA_PORT -ErrorAction SilentlyContinue
 ```
 
 ## API et tableau de bord
@@ -373,10 +384,12 @@ Le service est configuré pour écouter sur `127.0.0.1:8000` par défaut.
 | `GET` | `/` | Tableau de bord de recherche. |
 | `GET` | `/api/v1/health` | État du service et disponibilité des bases. |
 | `GET` | `/api/v1/sites` | Sites disponibles dans les bases préparées. |
-| `GET` | `/api/v1/pages` | Liste et recherche des pages. |
+| `GET` | `/api/v1/pages` | Liste et recherche des pages (`match_mode=contains` ou `whole`). |
 | `GET` | `/api/v1/pages/{id}` | Détail d’une page. |
-| `GET` | `/api/v1/documents` | Liste et recherche des PDF indexés. |
+| `GET` | `/api/v1/documents` | Liste et recherche des PDF indexés (`match_mode=contains` ou `whole`). |
 | `GET` | `/api/v1/documents/{id}` | Détail d’un PDF indexé. |
+| `GET` | `/api/v1/images` | Galerie paginée des images locales (`q`, `site`, `match_mode`, `limit`, `offset`). |
+| `GET` | `/api/v1/images/file?url={url}` | Sert une image enregistrée en base et confinée à `img/`. |
 | `GET` | `/docs` | Documentation OpenAPI interactive de FastAPI. |
 
 Exemples de requêtes :
@@ -385,11 +398,14 @@ Exemples de requêtes :
 http://127.0.0.1:8000/api/v1/health
 http://127.0.0.1:8000/api/v1/sites
 http://127.0.0.1:8000/api/v1/pages?q=budget&limit=20&offset=0
-http://127.0.0.1:8000/api/v1/pages?q=budget&site=primature.gov.bf
-http://127.0.0.1:8000/api/v1/documents?q=recrutement&limit=10
+http://127.0.0.1:8000/api/v1/pages?q=budget&site=primature.gov.bf&match_mode=whole
+http://127.0.0.1:8000/api/v1/documents?q=recrutement&limit=10&match_mode=contains
+http://127.0.0.1:8000/api/v1/images?site=primature.gov.bf&limit=20&match_mode=contains
 ```
 
-Les paramètres `q` et `site` filtrent les pages et les documents. Dans les
+Les paramètres `q` et `site` filtrent les pages et les documents. `match_mode`
+choisit entre `contains` (par défaut, trouve aussi une partie de mot, par
+exemple `char` dans `charge`) et `whole` (mot entier uniquement). Dans les
 recherches textuelles, les termes sont combinés avec `AND`. Les listes sont
 limitées par défaut à 20 éléments, avec un maximum de 100 par requête ; `offset`
 permet de parcourir les pages suivantes. Le texte des fiches détaillées est

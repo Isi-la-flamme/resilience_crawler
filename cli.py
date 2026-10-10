@@ -82,6 +82,8 @@ def main(argv=None):
     - `--no-images` conserve les URL d'images extraites mais désactive leur
       téléchargement et leur stockage local.
     - `--no-documents` ignore les documents reconnus sans les enregistrer.
+    - `--no-html` analyse le HTML pour découvrir les liens et ressources, sans
+      enregistrer les pages elles-mêmes.
 
     Les gestionnaires de logs créés sont toujours détachés et fermés en fin
     d'exécution. Les erreurs utilisateur, réseau et stockage sont converties
@@ -141,6 +143,11 @@ def main(argv=None):
         help="Désactive le téléchargement des images (leurs URL restent collectées)",
     )
     cli.add_argument(
+        "--no-html",
+        action="store_true",
+        help="N'enregistre pas les pages HTML (les analyse pour découvrir liens et ressources)",
+    )
+    cli.add_argument(
         "--no-documents",
         action="store_true",
         help="Désactive le téléchargement et le stockage des documents",
@@ -174,6 +181,12 @@ def main(argv=None):
                 f"{counts['documents']} documents)."
             )
             return
+
+        if args.no_html and args.no_images and args.no_documents:
+            cli.error(
+                "HTML, images et documents sont tous désactivés ; "
+                "réactivez au moins un type de contenu."
+            )
 
         for option in ("max_pages", "workers", "retries"):
             value = getattr(args, option)
@@ -243,6 +256,7 @@ def main(argv=None):
                     database_flush_interval=config["database_flush_interval"],
                     refresh=args.refresh,
                     database=database,
+                    download_html=not args.no_html,
                     download_images=not args.no_images,
                     download_documents=not args.no_documents,
                 )
