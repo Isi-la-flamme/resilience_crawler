@@ -516,3 +516,7 @@ collecte.
 Ces fichiers peuvent être normaux pendant l’activité SQLite en mode WAL.
 Laisser le processus terminer et fermer proprement la base avant tout
 déplacement ou archivage.
+
+---
+
+*Fait avec ❤️ au Burkina Faso, en soutien à la révolution progressiste populaire. *
