@@ -20,6 +20,7 @@ class TestHandler(BaseHTTPRequestHandler):
     missing_get_requests = 0
     missing_head_requests = 0
     oversized_document_requests = 0
+    document_requests = 0
     out_of_scope_redirect_target_requests = 0
     head_requests = 0
     slow_active = 0
@@ -29,6 +30,8 @@ class TestHandler(BaseHTTPRequestHandler):
     slow_lock = threading.Lock()
 
     def do_GET(self):
+        if self.path.startswith("/files/"):
+            type(self).document_requests += 1
         if self.path == "/redirect-out":
             self.send_response(302)
             self.send_header(
@@ -604,6 +607,49 @@ class CrawlerTests(unittest.TestCase):
             )
             self.assertRegex(image_path.name, r"^test-image_[0-9a-f]{8}\.png$")
             self.assertEqual(image_path.read_bytes(), b"\x89PNG\r\n\x1a\n")
+
+    def test_can_disable_document_downloads(self):
+        TestHandler.document_requests = 0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            start_url = self.base_url + "/next"
+            document_url = self.base_url + "/files/rapport.pdf"
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                database.enqueue(start_url, [document_url])
+                result = self.make_crawler(
+                    "/next",
+                    database=database,
+                    documents_dir=Path(temp_dir) / "documents",
+                    download_documents=False,
+                ).crawl()
+                document_status = database._connection.execute(
+                    "SELECT status FROM url_queue WHERE start_url=? AND url=?",
+                    (start_url, document_url),
+                ).fetchone()[0]
+                document_count = database.summary()["documents"]
+
+        self.assertEqual([page["url"] for page in result["pages"]], [start_url])
+        self.assertEqual(document_status, "skipped")
+        self.assertEqual(document_count, 0)
+        self.assertEqual(TestHandler.document_requests, 0)
+
+    def test_can_disable_image_download_while_collecting_image_urls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "crawl.db"
+            image_url = self.base_url + "/test-image.png"
+            with CrawlDatabase(database_path) as database:
+                result = self.make_crawler(
+                    "/with-image",
+                    database=database,
+                    image_dir=Path(temp_dir) / "img",
+                    download_images=False,
+                ).crawl()
+                image_count = database.summary()["images"]
+
+        page = result["pages"][0]
+        self.assertEqual(page["images"], [image_url])
+        self.assertEqual(page["downloaded_images"], [])
+        self.assertEqual(image_count, 0)
+        self.assertFalse((Path(temp_dir) / "img").exists())
 
     def test_downloads_images_in_configured_batches(self):
         TestHandler.image_max_active = 0

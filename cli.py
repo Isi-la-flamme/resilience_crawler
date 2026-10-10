@@ -79,6 +79,9 @@ def main(argv=None):
       si elles sont vides, un rappel invite à lancer avec `--config`.
     - `--retry-failed` réactive explicitement les échecs dans le périmètre
       sélectionné ; `--refresh` revalide les pages déjà enregistrées.
+    - `--no-images` conserve les URL d'images extraites mais désactive leur
+      téléchargement et leur stockage local.
+    - `--no-documents` ignore les documents reconnus sans les enregistrer.
 
     Les gestionnaires de logs créés sont toujours détachés et fermés en fin
     d'exécution. Les erreurs utilisateur, réseau et stockage sont converties
@@ -131,6 +134,16 @@ def main(argv=None):
         "--refresh",
         action="store_true",
         help="Vérifie si les pages déjà enregistrées ont changé",
+    )
+    cli.add_argument(
+        "--no-images",
+        action="store_true",
+        help="Désactive le téléchargement des images (leurs URL restent collectées)",
+    )
+    cli.add_argument(
+        "--no-documents",
+        action="store_true",
+        help="Désactive le téléchargement et le stockage des documents",
     )
     cli.add_argument(
         "--retry-failed",
@@ -230,6 +243,8 @@ def main(argv=None):
                     database_flush_interval=config["database_flush_interval"],
                     refresh=args.refresh,
                     database=database,
+                    download_images=not args.no_images,
+                    download_documents=not args.no_documents,
                 )
                 for start_url in start_urls
             ]

@@ -19,6 +19,10 @@ class DocumentTooLargeError(ResponseTooLargeError):
     """Indique qu'un document dépasse la limite dédiée aux documents."""
 
 
+class DocumentDownloadDisabledError(ValueError):
+    """Indique qu'un document a été détecté alors que son téléchargement est désactivé."""
+
+
 class OutOfScopeRedirectError(ValueError):
     """Signale une redirection HTTP vers un hôte non autorisé."""
 
@@ -55,7 +59,14 @@ class Fetcher:
         self.max_response_bytes = max_response_bytes
         self.user_agent = user_agent
 
-    def fetch(self, url, retries=2, headers=None, redirect_validator=None):
+    def fetch(
+        self,
+        url,
+        retries=2,
+        headers=None,
+        redirect_validator=None,
+        skip_documents=False,
+    ):
         """Récupère une URL et retourne son corps, son type et ses validateurs.
 
         Un 304 renvoie `(None, None, None, validators)` sans retry. Les erreurs
@@ -69,6 +80,8 @@ class Fetcher:
             headers: En-têtes additionnels, notamment les validateurs conditionnels.
             redirect_validator: Prédicat facultatif validant chaque URL de
                 redirection avant de la suivre.
+            skip_documents: Si vrai, abandonne les réponses document après les
+                en-têtes, avant de lire le corps.
 
         Returns:
             Tuple `(body, content_type, charset, validators)`. `body` est en
@@ -78,6 +91,8 @@ class Fetcher:
         Raises:
             HTTPError: Pour les statuts non récupérables ou après épuisement des retries.
             DocumentTooLargeError: Si un document dépasse sa limite.
+            DocumentDownloadDisabledError: Si `skip_documents` est vrai et que
+                la réponse est reconnue comme document.
             ResponseTooLargeError: Si une réponse ordinaire dépasse sa limite.
             OutOfScopeRedirectError: Si le validateur refuse une redirection.
             URLError, TimeoutError, OSError: En cas d'échec réseau final.
@@ -100,6 +115,10 @@ class Fetcher:
                     with response_context as response:
                         content_type = response.headers.get_content_type()
                         is_document = document_extension(url, content_type) is not None
+                        if skip_documents and is_document:
+                            raise DocumentDownloadDisabledError(
+                                f"Téléchargement de document désactivé : {url}"
+                            )
                         response_limit = (
                             min(self.max_response_bytes, MAX_DOCUMENT_BYTES)
                             if is_document
@@ -153,6 +172,8 @@ class Fetcher:
                     if error.code not in RETRYABLE_STATUS_CODES or attempt == retries:
                         raise
                 except OutOfScopeRedirectError:
+                    raise
+                except DocumentDownloadDisabledError:
                     raise
                 except ResponseTooLargeError as error:
                     logger.warning("FETCH skipped for %s: %s", url, error)

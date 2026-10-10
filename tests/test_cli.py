@@ -48,6 +48,80 @@ class CliTests(unittest.TestCase):
         load_config.assert_called_once_with(cli.DEFAULT_CONFIG_PATH)
         crawler_class.assert_called_once()
 
+    def test_no_images_flag_disables_image_downloads(self):
+        config = {
+            "start_urls": ["https://configured.example/"],
+            "max_pages": 25,
+            "workers": 2,
+            "delay": 0,
+            "timeout": 5,
+            "retries": 1,
+            "max_response_bytes": 1024,
+            "database_path": Path("crawl.db"),
+            "images_path": Path("img"),
+            "documents_path": Path("documents"),
+            "log_path": Path("crawler.jsonl"),
+            "crawler_name": "Test",
+            "database_flush_interval": 30,
+            "image_batch_size": 1,
+        }
+        with (
+            patch("cli.load_config", return_value=config),
+            patch("cli.configure_logging", return_value=[]),
+            patch("cli.CrawlDatabase") as database_class,
+            patch("cli.Crawler") as crawler_class,
+        ):
+            database = database_class.return_value.__enter__.return_value
+            database.queued_start_urls.return_value = []
+            database.ensure_start_url_queued.return_value = 0
+            database.summary.return_value = {
+                "pages": 0,
+                "images": 0,
+                "documents": 0,
+            }
+            crawler_class.crawl_many.return_value = [{"pages": []}]
+
+            cli.main(["--config", "--no-images"])
+
+        self.assertFalse(crawler_class.call_args.kwargs["download_images"])
+
+    def test_no_documents_flag_disables_document_downloads(self):
+        config = {
+            "start_urls": ["https://configured.example/"],
+            "max_pages": 25,
+            "workers": 2,
+            "delay": 0,
+            "timeout": 5,
+            "retries": 1,
+            "max_response_bytes": 1024,
+            "database_path": Path("crawl.db"),
+            "images_path": Path("img"),
+            "documents_path": Path("documents"),
+            "log_path": Path("crawler.jsonl"),
+            "crawler_name": "Test",
+            "database_flush_interval": 30,
+            "image_batch_size": 1,
+        }
+        with (
+            patch("cli.load_config", return_value=config),
+            patch("cli.configure_logging", return_value=[]),
+            patch("cli.CrawlDatabase") as database_class,
+            patch("cli.Crawler") as crawler_class,
+        ):
+            database = database_class.return_value.__enter__.return_value
+            database.queued_start_urls.return_value = []
+            database.ensure_start_url_queued.return_value = 0
+            database.summary.return_value = {
+                "pages": 0,
+                "images": 0,
+                "documents": 0,
+            }
+            crawler_class.crawl_many.return_value = [{"pages": []}]
+
+            cli.main(["--config", "--no-documents"])
+
+        self.assertFalse(crawler_class.call_args.kwargs["download_documents"])
+
     def test_export_excel_does_not_start_a_crawl(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.json"

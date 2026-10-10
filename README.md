@@ -34,7 +34,8 @@ réutilisés.** Le statut des droits est actuellement `not_assessed` (« non
   conditionnels lorsque le serveur les fournit.
 - Exclusion des URL dont le dernier segment du chemin est `pricing` ou `token`,
   à la découverte par le crawler et dans les résultats de l’API.
-- Téléchargement des images et documents dans des dossiers distincts.
+- Téléchargement des images (`--no-images`) et documents (`--no-documents`)
+  désactivable indépendamment.
 - Export Excel des pages, images et documents.
 - Nettoyage du HTML en texte brut, avec exclusion des éléments non éditoriaux
   et détection de blocs répétitifs par site.
@@ -108,6 +109,12 @@ Les commandes suivantes sont à exécuter depuis la racine du projet.
    `config.yaml` par défaut. Pour utiliser un autre fichier, indiquez son chemin
    après `--config`.
 
+   Pour conserver les URL d'images découvertes sans télécharger leurs fichiers :
+
+   ```powershell
+   .\.venv\Scripts\python.exe cli.py --config --no-images
+   ```
+
    Le crawler crée ou réutilise `crawl.db`, `img/`, `documents/` et
    `crawler.log.jsonl`. Sans `--config`, la commande ne démarre pas de nouveaux
    sites : elle ne reprend que les sites ayant une file en attente dans SQLite.
@@ -179,6 +186,13 @@ Les valeurs CLI `--max-pages`, `--workers` et `--retries` remplacent la
 configuration uniquement pour le lancement courant. `--retries 0` désactive
 les reprises après la tentative initiale. Vérifier les règles d’accès des sites
 et choisir une cadence raisonnable avant toute collecte.
+L’option `--no-images` désactive les téléchargements d’images pour ce lancement ;
+les URL des images restent extraites et enregistrées avec les pages.
+L’option `--no-documents` évite le téléchargement et le stockage des documents
+reconnus pour ce lancement. Les URL documentaires identifiées par leur extension
+sont ignorées avant la requête ; si le document n’est reconnaissable qu’au type
+MIME, le crawler s’arrête après les en-têtes HTTP, sans lire le corps. Ces URL
+passent à l’état `skipped` et ne seront pas reprises automatiquement.
 
 Une URL qui échoue après les retries configurés garde le statut `failed` et
 n’est pas remise en attente automatiquement au prochain lancement. Pour

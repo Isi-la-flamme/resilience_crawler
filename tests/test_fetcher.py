@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 from crawler.fetcher import (
     MAX_DOCUMENT_BYTES,
+    DocumentDownloadDisabledError,
     DocumentTooLargeError,
     Fetcher,
     ResponseTooLargeError,
@@ -11,6 +12,26 @@ from crawler.fetcher import (
 
 
 class FetcherTests(unittest.TestCase):
+    @patch("crawler.fetcher.urlopen")
+    def test_skips_document_before_reading_body_when_download_is_disabled(self, urlopen):
+        response = Mock()
+        response.headers = Message()
+        response.headers["Content-Type"] = "application/pdf"
+        response.headers["Content-Length"] = "100"
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        urlopen.return_value = response
+
+        with self.assertRaises(DocumentDownloadDisabledError):
+            Fetcher().fetch(
+                "https://example.org/download",
+                retries=2,
+                skip_documents=True,
+            )
+
+        urlopen.assert_called_once()
+        response.read.assert_not_called()
+
     @patch("crawler.fetcher.urlopen")
     def test_rejects_oversized_content_length_without_retry(self, urlopen):
         response = Mock()

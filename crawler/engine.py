@@ -19,7 +19,12 @@ from .metrics import metrics
 from .database import CrawlDatabase
 
 from .document_downloader import DocumentDownloader, document_extension
-from .fetcher import DocumentTooLargeError, Fetcher, OutOfScopeRedirectError
+from .fetcher import (
+    DocumentDownloadDisabledError,
+    DocumentTooLargeError,
+    Fetcher,
+    OutOfScopeRedirectError,
+)
 
 from .image_downloader import ImageDownloader
 
@@ -57,6 +62,8 @@ class Crawler:
         fetcher=None,
         database=None,
         refresh=False,
+        download_images=True,
+        download_documents=True,
     ):
         """Configure un site et ses dépendances de collecte.
 
@@ -78,6 +85,8 @@ class Crawler:
             database: Base partagée facultative. Si omise, une base mémoire est
                 créée et fermée par ce crawler.
             refresh: Revalide les pages déjà enregistrées à l'aide des validateurs HTTP.
+            download_images: Télécharge et stocke les images trouvées si vrai.
+            download_documents: Télécharge et stocke les documents reconnus si vrai.
 
         Raises:
             ValueError: Si l'URL ou une limite numérique est invalide.
@@ -103,6 +112,8 @@ class Crawler:
         self.crawler_name = crawler_name
         self.database_flush_interval = database_flush_interval
         self.refresh = refresh
+        self.download_images = download_images
+        self.download_documents = download_documents
         self.sleep = sleep
         self._next_request_at = {}
         self._rate_limit_lock = threading.Lock()
@@ -355,6 +366,10 @@ class Crawler:
                 crawler.database.set_url_status(crawler.start_url, url, "skipped")
                 logger.info("Skipping oversized document %s: %s", url, error)
                 continue
+            except DocumentDownloadDisabledError as error:
+                crawler.database.set_url_status(crawler.start_url, url, "skipped")
+                logger.info("Skipping document because downloads are disabled: %s", error)
+                continue
             except OutOfScopeRedirectError as error:
                 crawler.database.set_url_status(crawler.start_url, url, "skipped")
                 logger.info("Skipping out-of-scope redirect for %s: %s", url, error)
@@ -442,6 +457,11 @@ class Crawler:
             Tuple `(page, discovered_urls, validators, not_modified)`. Pour un
             document ou un type ignoré, `page` vaut `None` et les liens sont vides.
         """
+        if not self.download_documents and document_extension(url, "") is not None:
+            raise DocumentDownloadDisabledError(
+                f"Téléchargement de document désactivé : {url}"
+            )
+
         self._wait_for_delay(url)
         cached_page = (
             self.database.page_cache(self.start_url, url)
@@ -458,6 +478,7 @@ class Crawler:
             retries=self.retries,
             headers=request_headers,
             redirect_validator=self._is_in_scope_url,
+            skip_documents=not self.download_documents,
         )
         if body is None:
             if cached_page is None:
@@ -514,7 +535,9 @@ class Crawler:
             title, raw_links, raw_images, published_at, content = PageParser.parse_html(html)
         links = self._normalize_resources(url, raw_links, same_scope=True)
         image_urls = self._normalize_resources(url, raw_images, same_scope=True)
-        downloaded_images = self._download_images(image_urls)
+        downloaded_images = (
+            self._download_images(image_urls) if self.download_images else []
+        )
 
         page = {
             "url": url,

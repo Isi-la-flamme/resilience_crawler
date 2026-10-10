@@ -1,34 +1,34 @@
 {
-  "crawl_duration_seconds": 628.32,
-  "date": "2026-10-10T04:17:50+00:00",
-  "test_number": 197,
+  "crawl_duration_seconds": 22.3,
+  "date": "2026-10-10T04:50:09+00:00",
+  "test_number": 257,
   "configuration": {
-    "workers": 2,
-    "max_pages": 500,
+    "workers": 8,
+    "max_pages": 25,
     "image_batch_size": 1
   },
   "wait": {
-    "total_seconds": 8.5932,
-    "calls": 529,
-    "avg_ms": 16.24,
-    "usage_percent": 1.37
+    "total_seconds": 55.5054,
+    "calls": 38,
+    "avg_ms": 1460.67,
+    "usage_percent": 248.9
   },
   "fetch": {
-    "total_seconds": 1228.4141,
-    "calls": 529,
-    "avg_ms": 2322.14,
-    "usage_percent": 195.51
+    "total_seconds": 97.1864,
+    "calls": 38,
+    "avg_ms": 2557.54,
+    "usage_percent": 435.81
   },
   "parse": {
-    "total_seconds": 7.3305,
-    "calls": 500,
-    "avg_ms": 14.66,
-    "usage_percent": 1.17
+    "total_seconds": 0.3464,
+    "calls": 25,
+    "avg_ms": 13.85,
+    "usage_percent": 1.55
   },
   "db": {
-    "total_seconds": 1.7896,
-    "calls": 21,
-    "avg_ms": 85.22,
-    "usage_percent": 0.28
+    "total_seconds": 0.1469,
+    "calls": 1,
+    "avg_ms": 146.92,
+    "usage_percent": 0.66
   }
 }
