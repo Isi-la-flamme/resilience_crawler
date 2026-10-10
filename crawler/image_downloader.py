@@ -10,15 +10,27 @@ logger = logging.getLogger(__name__)
 
 
 class ImageDownloader:
-    def __init__(self, fetcher, output_dir, retries=2, before_request=None):
+    def __init__(
+        self,
+        fetcher,
+        output_dir,
+        retries=2,
+        before_request=None,
+        redirect_validator=None,
+    ):
         self.fetcher = fetcher
         self.store = FileStore(output_dir)
         self.retries = retries
         self.before_request = before_request or (lambda url: None)
+        self.redirect_validator = redirect_validator
 
     def download(self, url):
         self.before_request(url)
-        body, content_type, _, _ = self.fetcher.fetch(url, retries=self.retries)
+        body, content_type, _, _ = self.fetcher.fetch(
+            url,
+            retries=self.retries,
+            redirect_validator=self.redirect_validator,
+        )
         if not content_type.startswith("image/"):
             raise ValueError(f"Ressource non image ({content_type}) : {url}")
 

@@ -19,7 +19,7 @@ from .metrics import metrics
 from .database import CrawlDatabase
 
 from .document_downloader import DocumentDownloader, document_extension
-from .fetcher import DocumentTooLargeError, Fetcher
+from .fetcher import DocumentTooLargeError, Fetcher, OutOfScopeRedirectError
 
 from .image_downloader import ImageDownloader
 
@@ -59,8 +59,8 @@ class Crawler:
         if database_flush_interval <= 0:
             raise ValueError("database_flush_interval doit être strictement positif.")
 
-        self.start_url = self._normalize_url(start_url)
-        self.origin = self._origin(self.start_url)
+        self.start_url = self._normalize_url(start_url, same_scope=False)
+        self.scope_host = urlsplit(self.start_url).hostname.lower()
         self.max_pages = max_pages
         self.delay = delay
         self.timeout = timeout
@@ -87,6 +87,7 @@ class Crawler:
             Path(image_dir) / self.site_name,
             retries=retries,
             before_request=self._wait_for_delay,
+            redirect_validator=self._is_in_scope_url,
         )
         self.document_downloader = DocumentDownloader(documents_dir)
         self._robots: RobotFileParser = RobotFileParser()
@@ -212,6 +213,13 @@ class Crawler:
                 continue
             progress = True
 
+            try:
+                crawler._normalize_url(url)
+            except ValueError:
+                crawler.database.set_url_status(crawler.start_url, url, "skipped")
+                logger.info("Ignoring out-of-scope URL: %s", url)
+                continue
+
             if crawler._is_excluded_url(url):
                 crawler.database.set_url_status(crawler.start_url, url, "skipped")
                 logger.info("Ignoring excluded URL: %s", url)
@@ -275,6 +283,10 @@ class Crawler:
             except DocumentTooLargeError as error:
                 crawler.database.set_url_status(crawler.start_url, url, "skipped")
                 logger.info("Skipping oversized document %s: %s", url, error)
+                continue
+            except OutOfScopeRedirectError as error:
+                crawler.database.set_url_status(crawler.start_url, url, "skipped")
+                logger.info("Skipping out-of-scope redirect for %s: %s", url, error)
                 continue
             except (URLError, TimeoutError, OSError, ValueError) as error:
                 crawler.database.set_url_status(crawler.start_url, url, "failed", str(error))
@@ -362,6 +374,7 @@ class Crawler:
             url,
             retries=self.retries,
             headers=request_headers,
+            redirect_validator=self._is_in_scope_url,
         )
         if body is None:
             if cached_page is None:
@@ -408,8 +421,8 @@ class Crawler:
         html = body.decode(charset or "utf-8", errors="replace")
         with metrics.measure("parse"):
             title, raw_links, raw_images, published_at, content = PageParser.parse_html(html)
-        links = self._normalize_resources(url, raw_links, same_origin=True)
-        image_urls = self._normalize_resources(url, raw_images, same_origin=False)
+        links = self._normalize_resources(url, raw_links, same_scope=True)
+        image_urls = self._normalize_resources(url, raw_images, same_scope=True)
         downloaded_images = self._download_images(image_urls)
 
         page = {
@@ -481,11 +494,14 @@ class Crawler:
         return None
     
 
-    def _normalize_resources(self, page_url, resources, same_origin):
+    def _normalize_resources(self, page_url, resources, same_scope):
         normalized_urls = []
         for resource in resources:
             try:
-                url = self._normalize_url(urljoin(page_url, resource), same_origin=same_origin)
+                url = self._normalize_url(
+                    urljoin(page_url, resource),
+                    same_scope=same_scope,
+                )
             except ValueError:
                 logger.debug("Ignoring unsupported or out-of-scope URL: %s", resource)
                 continue
@@ -508,7 +524,14 @@ class Crawler:
         parser.set_url(robots_url)
         try:
             self._wait_for_delay(robots_url)
-            body, _, charset, _ = self.fetcher.fetch(robots_url, retries=self.retries)
+            body, _, charset, _ = self.fetcher.fetch(
+                robots_url,
+                retries=self.retries,
+                redirect_validator=self._is_in_scope_url,
+            )
+        except OutOfScopeRedirectError as error:
+            logger.warning("robots.txt redirect outside configured domain: %s", error)
+            parser.parse([])
         except HTTPError as error:
             if error.code == 404:
                 logger.info("No robots.txt at %s", robots_url)
@@ -541,7 +564,7 @@ class Crawler:
                     self.sleep(wait_seconds)
                 self._next_request_at[host] = time.monotonic() + self.delay
 
-    def _normalize_url(self, url, same_origin=True):
+    def _normalize_url(self, url, same_scope=True):
         parts = urlsplit(url)
         if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
             raise ValueError("L'URL doit utiliser HTTP ou HTTPS.")
@@ -552,15 +575,19 @@ class Crawler:
             parts.query,
             "",
         ))
-        if (
-            same_origin
-            and hasattr(self, "origin")
-            and self._origin(normalized) != self.origin
-        ):
+        if same_scope and hasattr(self, "scope_host") and not self._is_in_scope_url(normalized):
             raise ValueError("Les liens hors du domaine de départ ne sont pas autorisés.")
         return normalized
 
-    @staticmethod
-    def _origin(url):
-        parts = urlsplit(url)
-        return parts.scheme.lower(), parts.netloc.lower()
+    def _is_in_scope_url(self, url):
+        try:
+            parts = urlsplit(url)
+            hostname = parts.hostname
+            if parts.scheme.lower() not in {"http", "https"} or not hostname:
+                return False
+            hostname = hostname.rstrip(".").lower()
+        except ValueError:
+            return False
+        return hostname == self.scope_host or hostname.endswith(
+            "." + self.scope_host
+        )

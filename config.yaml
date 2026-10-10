@@ -2,7 +2,7 @@ start_urls:
   - https://www.presidencedufaso.bf/
 
    
-max_pages: 1000
+max_pages: 100
 workers: 2
 delay: 0.5
 image_batch_size: 1

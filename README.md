@@ -104,6 +104,10 @@ Les commandes suivantes sont à exécuter depuis la racine du projet.
    .\.venv\Scripts\python.exe cli.py --config config.yaml
    ```
 
+   Le chemin est facultatif : `python cli.py --config` charge également
+   `config.yaml` par défaut. Pour utiliser un autre fichier, indiquez son chemin
+   après `--config`.
+
    Le crawler crée ou réutilise `crawl.db`, `img/`, `documents/` et
    `crawler.log.jsonl`. Sans `--config`, la commande ne démarre pas de nouveaux
    sites : elle ne reprend que les sites ayant une file en attente dans SQLite.
@@ -204,7 +208,13 @@ Il reprend leurs URL en attente dans SQLite. Pour chaque URL de départ sans
 travail en attente, il initialise la file depuis les liens déjà enregistrés ;
 si aucune page du site n’existe encore, il démarre depuis le `start_url`. Les
 files en attente de sites absents du YAML ne sont pas traitées par ce lancement.
-Les URL déjà terminées ou en échec ne sont pas réactivées.
+Elles restent en état `queued` dans SQLite pour une reprise ultérieure sans
+configuration ou après ajout du site au YAML. Les URL déjà terminées ou en échec
+ne sont pas réactivées.
+Chaque `start_url` définit sa portée : son domaine et ses sous-domaines sont
+crawlés ; les autres domaines doivent être explicitement ajoutés au YAML. Les
+liens et images externes, y compris ceux déjà présents dans la file SQLite,
+sont ignorés. Les redirections HTTP hors de cette portée sont refusées.
 
 Si la file d’un site a été supprimée mais que ses pages restent en base,
 l’initialisation reconstruit la file depuis les liens sauvegardés de ces pages.

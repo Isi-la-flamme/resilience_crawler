@@ -1,7 +1,7 @@
 import logging
 import time
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from .constants import USER_AGENT
 from .document_downloader import document_extension
 from .metrics import metrics
@@ -19,15 +19,33 @@ class DocumentTooLargeError(ResponseTooLargeError):
     pass
 
 
+class OutOfScopeRedirectError(ValueError):
+    pass
+
+
+class _ScopeRedirectHandler(HTTPRedirectHandler):
+    def __init__(self, is_allowed):
+        super().__init__()
+        self.is_allowed = is_allowed
+
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        if not self.is_allowed(new_url):
+            raise OutOfScopeRedirectError(
+                f"Redirection hors du domaine autorisé refusée : {new_url}"
+            )
+        return super().redirect_request(
+            request, response, code, message, headers, new_url
+        )
+
+
 class Fetcher:
     def __init__(self, timeout=10, max_response_bytes=5 * 1024 * 1024, user_agent=USER_AGENT):
         self.timeout = timeout
         self.max_response_bytes = max_response_bytes
         self.user_agent = user_agent
 
-    def fetch(self, url, retries=2, headers=None):
+    def fetch(self, url, retries=2, headers=None, redirect_validator=None):
         with metrics.measure("fetch"):
-                
             for attempt in range(retries + 1):
                 logger.info("FETCH start %s (attempt %d/%d)", url, attempt + 1, retries + 1)
                 request_headers = {"User-Agent": self.user_agent}
@@ -35,7 +53,14 @@ class Fetcher:
                     request_headers.update(headers)
                 request = Request(url, headers=request_headers)
                 try:
-                    with urlopen(request, timeout=self.timeout) as response:
+                    if redirect_validator is None:
+                        response_context = urlopen(request, timeout=self.timeout)
+                    else:
+                        opener = build_opener(
+                            _ScopeRedirectHandler(redirect_validator)
+                        )
+                        response_context = opener.open(request, timeout=self.timeout)
+                    with response_context as response:
                         content_type = response.headers.get_content_type()
                         is_document = document_extension(url, content_type) is not None
                         response_limit = (
@@ -90,6 +115,8 @@ class Fetcher:
                     error.close()
                     if error.code not in RETRYABLE_STATUS_CODES or attempt == retries:
                         raise
+                except OutOfScopeRedirectError:
+                    raise
                 except ResponseTooLargeError as error:
                     logger.warning("FETCH skipped for %s: %s", url, error)
                     raise

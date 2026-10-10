@@ -20,6 +20,7 @@ class TestHandler(BaseHTTPRequestHandler):
     missing_get_requests = 0
     missing_head_requests = 0
     oversized_document_requests = 0
+    out_of_scope_redirect_target_requests = 0
     head_requests = 0
     slow_active = 0
     slow_max_active = 0
@@ -28,6 +29,17 @@ class TestHandler(BaseHTTPRequestHandler):
     slow_lock = threading.Lock()
 
     def do_GET(self):
+        if self.path == "/redirect-out":
+            self.send_response(302)
+            self.send_header(
+                "Location",
+                f"http://localhost:{self.server.server_port}/redirect-target",
+            )
+            self.end_headers()
+            return
+        if self.path == "/redirect-target":
+            type(self).out_of_scope_redirect_target_requests += 1
+
         final_path_segment = self.path.rstrip("/").rsplit("/", 1)[-1].lower()
         if final_path_segment in {"pricing", "token"}:
             type(self).excluded_route_requests.append(self.path)
@@ -264,6 +276,58 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual(result["errors"], [])
         self.assertEqual(TestHandler.missing_head_requests, 0)
         self.assertEqual(TestHandler.missing_get_requests, 1)
+
+    def test_skips_out_of_scope_urls_already_in_queue(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            start_url = self.base_url + "/next"
+            external_url = "https://outside.example/"
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                database.enqueue(start_url, [external_url])
+                result = self.make_crawler(
+                    "/next",
+                    database=database,
+                ).crawl()
+                external_status = database._connection.execute(
+                    "SELECT status FROM url_queue WHERE start_url=? AND url=?",
+                    (start_url, external_url),
+                ).fetchone()[0]
+
+        self.assertEqual([page["url"] for page in result["pages"]], [start_url])
+        self.assertEqual(external_status, "skipped")
+
+    def test_allows_subdomains_but_not_unconfigured_domains(self):
+        crawler = Crawler("https://example.com/", sleep=lambda _: None)
+        try:
+            self.assertEqual(
+                crawler._normalize_url("https://docs.example.com/page"),
+                "https://docs.example.com/page",
+            )
+            with self.assertRaises(ValueError):
+                crawler._normalize_url("https://example.org/page")
+            with self.assertRaises(ValueError):
+                crawler._normalize_url("https://notexample.com/page")
+        finally:
+            crawler.database.close()
+
+    def test_does_not_follow_redirect_outside_configured_domain(self):
+        TestHandler.out_of_scope_redirect_target_requests = 0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            start_url = self.base_url + "/next"
+            redirect_url = self.base_url + "/redirect-out"
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                database.enqueue(start_url, [redirect_url])
+                result = self.make_crawler(
+                    "/next",
+                    database=database,
+                ).crawl()
+                redirect_status = database._connection.execute(
+                    "SELECT status FROM url_queue WHERE start_url=? AND url=?",
+                    (start_url, redirect_url),
+                ).fetchone()[0]
+
+        self.assertEqual([page["url"] for page in result["pages"]], [start_url])
+        self.assertEqual(redirect_status, "skipped")
+        self.assertEqual(TestHandler.out_of_scope_redirect_target_requests, 0)
 
     def test_obeys_page_limit(self):
         result = self.make_crawler(max_pages=1).crawl()

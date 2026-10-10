@@ -155,6 +155,30 @@ class DatabaseConfigTests(unittest.TestCase):
                 )
                 self.assertEqual(database.queued_start_urls([]), [])
 
+    def test_config_filter_leaves_unconfigured_sites_queued(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "crawl.db"
+            configured_start = "https://configured.example/"
+            unconfigured_start = "https://previously-known.example/"
+            with CrawlDatabase(database_path) as database:
+                database.enqueue(configured_start, [configured_start + "pending"])
+                database.enqueue(unconfigured_start, [unconfigured_start + "pending"])
+
+                self.assertEqual(
+                    database.queued_start_urls([configured_start]),
+                    [configured_start],
+                )
+                outside_status = database._connection.execute(
+                    "SELECT status FROM url_queue WHERE start_url=?",
+                    (unconfigured_start,),
+                ).fetchone()[0]
+
+                self.assertEqual(outside_status, "queued")
+                self.assertEqual(
+                    database.claim_next(unconfigured_start),
+                    unconfigured_start + "pending",
+                )
+
     def test_reseeds_missing_queue_from_saved_page_links(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "crawl.db"

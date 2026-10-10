@@ -39,7 +39,12 @@ def main(argv=None):
             "depuis leurs URL de départ si aucune file n’est en attente."
         )
     )
-    cli.add_argument("--config", help="Chemin du fichier de configuration")
+    cli.add_argument(
+        "--config",
+        nargs="?",
+        const="",
+        help="Chemin du fichier de configuration (par défaut : config.yaml)",
+    )
     cli.add_argument(
         "start_urls",
         nargs="*",
@@ -104,7 +109,7 @@ def main(argv=None):
         log_handlers = configure_logging(config)
         with CrawlDatabase(config["database_path"]) as database:
             requested_start_urls = args.start_urls or (
-                config["start_urls"] if args.config else []
+                config["start_urls"] if args.config is not None else []
             )
             queue_only = not requested_start_urls and not args.refresh
             if args.retry_failed:
