@@ -16,6 +16,24 @@ EXPORT_BATCH_SIZE = 1000
 
 
 def export_database_to_excel(database_path, output_path):
+    """Exporte les pages, images et documents SQLite dans un classeur XLSX.
+
+    La base est ouverte en lecture seule et les lignes sont lues par lots pour
+    limiter la mémoire. Le classeur temporaire est créé dans le dossier cible,
+    puis remplacé atomiquement après sauvegarde complète. La base source ne
+    peut pas être remplacée par le classeur.
+
+    Args:
+        database_path: Base crawler contenant `pages`, `images`, `documents`.
+        output_path: Fichier XLSX à créer ; il peut remplacer un export antérieur.
+
+    Returns:
+        Nombre de lignes exportées sous les clés `pages`, `images` et `documents`.
+
+    Raises:
+        ValueError: Si la sortie désigne le même fichier que la base source.
+        sqlite3.Error, OSError: En cas de problème de lecture ou d'écriture.
+    """
     database_path = Path(database_path).resolve()
     output_path = Path(output_path).resolve()
     if database_path == output_path:
@@ -111,6 +129,7 @@ def export_database_to_excel(database_path, output_path):
 
 
 def _create_sheet(workbook, title, headers):
+    """Crée une feuille filtrable avec ligne d'en-tête figée et mise en forme."""
     sheet = workbook.create_sheet(title)
     sheet.freeze_panes = "A2"
     sheet.append([
@@ -121,6 +140,7 @@ def _create_sheet(workbook, title, headers):
 
 
 def _append_query_rows(connection, sheet, query, row_converter):
+    """Ajoute au classeur les résultats SQL par lots et retourne leur nombre."""
     cursor = connection.execute(query)
     count = 0
     while rows := cursor.fetchmany(EXPORT_BATCH_SIZE):
@@ -137,6 +157,11 @@ def _append_query_rows(connection, sheet, query, row_converter):
 
 
 def _page_row(row):
+    """Convertit une ligne `pages` en colonnes Excel et borne le texte.
+
+    La colonne `Contenu tronqué` indique si le texte a dépassé la limite
+    d'Excel ; le contenu est alors coupé en gardant une ellipse finale.
+    """
     page_id, start_url, url, title, published_at, content, crawled_at = row
     content_text = "" if content is None else str(content)
     content_truncated = len(content_text) > EXCEL_MAX_CELL_LENGTH
@@ -155,6 +180,7 @@ def _page_row(row):
 
 
 def _image_row(row):
+    """Convertit une ligne d'image et dérive le nom du site depuis son URL."""
     url, local_path, status, error = row
     return (
         urlsplit(url).hostname or "",
@@ -166,6 +192,12 @@ def _image_row(row):
 
 
 def _excel_cell(sheet, value, header=False):
+    """Nettoie et construit une cellule XLSX, en forçant les chaînes en texte.
+
+    Les caractères illégaux sont supprimés et les textes sont limités à la
+    longueur maximale d'une cellule Excel. Les en-têtes reçoivent le style
+    visuel du rapport.
+    """
     if value is None:
         value = ""
     if isinstance(value, str):

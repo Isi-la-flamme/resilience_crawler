@@ -12,23 +12,27 @@ MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 
 
 class ResponseTooLargeError(ValueError):
-    pass
+    """Indique qu'une réponse HTTP dépasse la limite autorisée."""
 
 
 class DocumentTooLargeError(ResponseTooLargeError):
-    pass
+    """Indique qu'un document dépasse la limite dédiée aux documents."""
 
 
 class OutOfScopeRedirectError(ValueError):
-    pass
+    """Signale une redirection HTTP vers un hôte non autorisé."""
 
 
 class _ScopeRedirectHandler(HTTPRedirectHandler):
+    """Bloque les redirections dont la destination échoue au prédicat fourni."""
+
     def __init__(self, is_allowed):
+        """Stocke un prédicat prenant l'URL de destination et renvoyant un booléen."""
         super().__init__()
         self.is_allowed = is_allowed
 
     def redirect_request(self, request, response, code, message, headers, new_url):
+        """Valide la destination avant de laisser urllib construire la requête."""
         if not self.is_allowed(new_url):
             raise OutOfScopeRedirectError(
                 f"Redirection hors du domaine autorisé refusée : {new_url}"
@@ -39,12 +43,45 @@ class _ScopeRedirectHandler(HTTPRedirectHandler):
 
 
 class Fetcher:
+    """Effectue des requêtes HTTP avec retries, limites de taille et cache HTTP."""
+
     def __init__(self, timeout=10, max_response_bytes=5 * 1024 * 1024, user_agent=USER_AGENT):
+        """Configure le délai réseau, la taille maximale et l'identité HTTP.
+
+        `max_response_bytes` s'applique aux réponses ordinaires. Les documents
+        reconnus sont en plus plafonnés à `MAX_DOCUMENT_BYTES`.
+        """
         self.timeout = timeout
         self.max_response_bytes = max_response_bytes
         self.user_agent = user_agent
 
     def fetch(self, url, retries=2, headers=None, redirect_validator=None):
+        """Récupère une URL et retourne son corps, son type et ses validateurs.
+
+        Un 304 renvoie `(None, None, None, validators)` sans retry. Les erreurs
+        transitoires HTTP configurées et les erreurs réseau sont réessayées avec
+        attente exponentielle ; les corps trop volumineux et redirections hors
+        portée échouent immédiatement.
+
+        Args:
+            url: URL HTTP(S) à télécharger.
+            retries: Nombre de tentatives supplémentaires après l'essai initial.
+            headers: En-têtes additionnels, notamment les validateurs conditionnels.
+            redirect_validator: Prédicat facultatif validant chaque URL de
+                redirection avant de la suivre.
+
+        Returns:
+            Tuple `(body, content_type, charset, validators)`. `body` est en
+            octets, et vaut `None` pour HTTP 304 ; `validators` contient `etag`
+            et `last_modified`.
+
+        Raises:
+            HTTPError: Pour les statuts non récupérables ou après épuisement des retries.
+            DocumentTooLargeError: Si un document dépasse sa limite.
+            ResponseTooLargeError: Si une réponse ordinaire dépasse sa limite.
+            OutOfScopeRedirectError: Si le validateur refuse une redirection.
+            URLError, TimeoutError, OSError: En cas d'échec réseau final.
+        """
         with metrics.measure("fetch"):
             for attempt in range(retries + 1):
                 logger.info("FETCH start %s (attempt %d/%d)", url, attempt + 1, retries + 1)
@@ -130,6 +167,7 @@ class Fetcher:
 
     @staticmethod
     def _validators(headers):
+        """Extrait les validateurs HTTP utilisés par le mode `--refresh`."""
         return {
             "etag": headers.get("ETag"),
             "last_modified": headers.get("Last-Modified"),

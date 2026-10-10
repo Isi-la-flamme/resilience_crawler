@@ -1,34 +1,34 @@
 {
-  "crawl_duration_seconds": 48.68,
-  "date": "2026-10-10T04:00:53+00:00",
-  "test_number": 195,
+  "crawl_duration_seconds": 628.32,
+  "date": "2026-10-10T04:17:50+00:00",
+  "test_number": 197,
   "configuration": {
     "workers": 2,
-    "max_pages": 100,
+    "max_pages": 500,
     "image_batch_size": 1
   },
   "wait": {
-    "total_seconds": 1.8462,
-    "calls": 40,
-    "avg_ms": 46.16,
-    "usage_percent": 3.79
+    "total_seconds": 8.5932,
+    "calls": 529,
+    "avg_ms": 16.24,
+    "usage_percent": 1.37
   },
   "fetch": {
-    "total_seconds": 91.8241,
-    "calls": 40,
-    "avg_ms": 2295.6,
-    "usage_percent": 188.64
+    "total_seconds": 1228.4141,
+    "calls": 529,
+    "avg_ms": 2322.14,
+    "usage_percent": 195.51
   },
   "parse": {
-    "total_seconds": 0.6227,
-    "calls": 37,
-    "avg_ms": 16.83,
-    "usage_percent": 1.28
+    "total_seconds": 7.3305,
+    "calls": 500,
+    "avg_ms": 14.66,
+    "usage_percent": 1.17
   },
   "db": {
-    "total_seconds": 0.1715,
-    "calls": 2,
-    "avg_ms": 85.73,
-    "usage_percent": 0.35
+    "total_seconds": 1.7896,
+    "calls": 21,
+    "avg_ms": 85.22,
+    "usage_percent": 0.28
   }
 }

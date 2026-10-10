@@ -4,10 +4,29 @@ from pathlib import Path
 import yaml
 
 
+# Configuration par défaut résolue indépendamment du répertoire de lancement.
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
 
 def load_config(path=DEFAULT_CONFIG_PATH):
+    """Charge, valide et complète la configuration du crawler.
+
+    Les fichiers `.json` sont lus comme JSON ; tous les autres suffixes sont
+    interprétés comme YAML. Les chemins de sortie relatifs sont résolus par
+    rapport au dossier du fichier de configuration, pas au répertoire courant.
+
+    Args:
+        path: Fichier JSON ou YAML. Par défaut, `config.yaml` à la racine du projet.
+
+    Returns:
+        Dictionnaire de configuration validé, avec les chemins absolus ajoutés
+        sous `database_path`, `images_path`, `documents_path` et `log_path`.
+
+    Raises:
+        FileNotFoundError: Si le fichier n'existe pas.
+        ValueError: Si le document, une valeur ou un chemin requis est invalide.
+        json.JSONDecodeError: Si un fichier JSON est mal formé.
+    """
     config_path = Path(path)
     with config_path.open(encoding="utf-8") as config_file:
         if config_path.suffix.lower() == ".json":

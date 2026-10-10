@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 class ImageDownloader:
+    """Télécharge et stocke des images via un fetcher partagé."""
+
     def __init__(
         self,
         fetcher,
@@ -18,6 +20,16 @@ class ImageDownloader:
         before_request=None,
         redirect_validator=None,
     ):
+        """Configure les dépendances, la politique de retry et les callbacks.
+
+        Args:
+            fetcher: Objet fournissant `fetch(url, ...)`.
+            output_dir: Dossier où stocker les images.
+            retries: Nombre de tentatives supplémentaires du fetcher.
+            before_request: Callback appelé avec l'URL avant chaque téléchargement.
+            redirect_validator: Prédicat qui autorise ou refuse chaque cible de
+                redirection HTTP ; `None` conserve le comportement du fetcher.
+        """
         self.fetcher = fetcher
         self.store = FileStore(output_dir)
         self.retries = retries
@@ -25,6 +37,11 @@ class ImageDownloader:
         self.redirect_validator = redirect_validator
 
     def download(self, url):
+        """Télécharge une URL et retourne le chemin de l'image enregistrée.
+
+        Le callback de temporisation est exécuté avant la requête. Le type MIME
+        doit commencer par `image/`; sinon la fonction lève `ValueError`.
+        """
         self.before_request(url)
         body, content_type, _, _ = self.fetcher.fetch(
             url,

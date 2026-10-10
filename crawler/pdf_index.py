@@ -14,6 +14,22 @@ INDEX_BATCH_SIZE = 25
 
 
 def build_pdf_index(source_database, output_database):
+    """Construit une base FTS5 séparée à partir des PDF stockés localement.
+
+    La base source est ouverte en lecture seule. Les PDF sont extraits par
+    petits lots, leurs métadonnées et texte sont indexés, puis la base complète
+    est publiée par remplacement atomique. Le chemin de sortie doit être
+    nouveau : un index existant n'est jamais écrasé.
+
+    Returns:
+        Compteurs `indexed`, `searchable`, `failed` et chemin `output`.
+        `searchable` exclut les PDF illisibles ou sans texte extractible.
+
+    Raises:
+        ValueError: Si source et sortie désignent la même base.
+        FileNotFoundError: Si la base source n'existe pas.
+        FileExistsError: Si le chemin d'index existe déjà.
+    """
     source_database = Path(source_database).resolve()
     output_database = Path(output_database).resolve()
     if source_database == output_database:
@@ -90,6 +106,7 @@ def build_pdf_index(source_database, output_database):
 
 
 def _create_index_schema(connection):
+    """Crée les tables, l'index FTS5 externe et son trigger d'insertion."""
     connection.executescript("""
         PRAGMA journal_mode=DELETE;
         CREATE TABLE documents (
@@ -132,6 +149,14 @@ def _create_index_schema(connection):
 
 
 def _extract_pdf(document):
+    """Extrait le texte et les métadonnées d'une ligne de document PDF.
+
+    Le statut retourné vaut `indexed`, `no_text` ou `error`. Les erreurs
+    attendues de lecture PDF sont enregistrées dans la ligne plutôt que de
+    faire échouer tout le lot ; les documents suivants restent indexables.
+    L'argument est une ligne SQL dans l'ordre sélectionné par
+    `build_pdf_index`.
+    """
     (
         start_url,
         url,
@@ -193,6 +218,7 @@ def _extract_pdf(document):
 
 
 def _metadata_text(value):
+    """Convertit une valeur de métadonnée PDF en texte non vide ou `None`."""
     if value is None:
         return None
     text = str(value).strip()
@@ -200,6 +226,7 @@ def _metadata_text(value):
 
 
 def _insert_records(connection, records):
+    """Insère un lot de résultats d'extraction dans `documents`."""
     connection.executemany(
         """INSERT INTO documents
            (start_url, url, site_name, local_path, filename, content_type,
@@ -211,6 +238,26 @@ def _insert_records(connection, records):
 
 
 def search_pdf_index(index_database, query, limit=20):
+    """Recherche les termes dans l'index PDF local et retourne les meilleurs hits.
+
+    Les mots sont extraits de la requête, cités pour éviter les opérateurs FTS
+    fournis par l'utilisateur, puis combinés en AND. Les résultats sont classés
+    par BM25 et incluent un extrait marqué par crochets.
+
+    Args:
+        index_database: Fichier SQLite produit par `build_pdf_index`.
+        query: Texte de recherche contenant au moins un mot.
+        limit: Nombre maximal de résultats (entier strictement positif).
+
+    Returns:
+        Lignes contenant titre, site, URL, chemin local, nombre de pages, statut
+        et extrait contextuel.
+
+    Raises:
+        FileNotFoundError: Si l'index ne se trouve pas sur le disque.
+        ValueError: Si la limite ou la requête est invalide.
+        sqlite3.Error: Si le fichier existe mais n'est pas un index lisible.
+    """
     index_database = Path(index_database).resolve()
     if not index_database.is_file():
         raise FileNotFoundError(f"Index PDF introuvable : {index_database}")

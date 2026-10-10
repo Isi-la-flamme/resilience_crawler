@@ -6,13 +6,22 @@ from datetime import datetime
 
 
 class Metrics:
+    """Agrège les durées et volumes d'appels par phase, de façon thread-safe."""
+
     def __init__(self):
+        """Crée un agrégateur vide protégé pour les accès concurrents."""
         self._durations = {}
         self._counts = {}
         self._lock = threading.Lock()
 
     @contextmanager
     def measure(self, phase):
+        """Mesure la durée d'un bloc et ajoute un appel à la phase.
+
+        La durée est enregistrée dans un bloc `finally`, donc également si le
+        code mesuré lève une exception. La méthode est un context manager :
+        `with metrics.measure("fetch")`.
+        """
         started = time.monotonic()
         try:
             yield
@@ -23,6 +32,11 @@ class Metrics:
                 self._counts[phase] = self._counts.get(phase, 0) + 1
 
     def summary(self):
+        """Retourne une copie des agrégats, avec moyenne en millisecondes.
+
+        La structure de retour est indexée par phase et expose `total_seconds`,
+        `calls` et `avg_ms`. Les durées et compteurs sont copiés sous verrou.
+        """
         with self._lock:
             return {
                 phase: {
@@ -43,6 +57,17 @@ class Metrics:
         image_batch_size,
         crawl_duration_seconds,
     ):
+        """Écrit un rapport JSON des métriques dans `path`.
+
+        Le numéro de test augmente à partir du rapport précédent s'il existe.
+        Chaque phase inclut son pourcentage de la durée totale. Un rapport
+        précédent mal formé n'est pas écrasé silencieusement.
+
+        Raises:
+            ValueError: Si la durée totale est non positive ou si le rapport
+                précédent contient une forme ou un numéro invalide.
+            OSError: Si le fichier ne peut pas être lu ou écrit.
+        """
         if crawl_duration_seconds <= 0:
             raise ValueError("La durée totale du crawl doit être strictement positive.")
 
@@ -82,6 +107,7 @@ class Metrics:
         )
 
     def reset(self):
+        """Réinitialise les durées et compteurs sans modifier le fichier JSON."""
         with self._lock:
             self._durations.clear()
             self._counts.clear()

@@ -1,3 +1,12 @@
+"""Interface en ligne de commande pour le crawl et l'export Excel.
+
+La configuration par défaut est `config.yaml`. Sans `--config` et sans URL
+positionnelle, la commande reprend seulement les files SQLite en attente. Avec
+`--config`, elle se limite aux URL configurées et reprend leur file avant de
+compléter leurs points de départ. Les limites de portée du crawler restent
+appliquées quel que soit le mode de lancement.
+"""
+
 import argparse
 import json
 import logging
@@ -12,6 +21,17 @@ from crawler.logging_setup import configure_logging
 
 
 def _positive_int(value):
+    """Convertit une option CLI en entier strictement positif.
+
+    Args:
+        value: Texte fourni après une option numérique.
+
+    Returns:
+        La valeur convertie en `int`.
+
+    Raises:
+        argparse.ArgumentTypeError: Si la valeur n'est pas un entier positif.
+    """
     try:
         parsed = int(value)
     except ValueError as error:
@@ -22,6 +42,17 @@ def _positive_int(value):
 
 
 def _non_negative_int(value):
+    """Convertit une option CLI en entier positif ou nul.
+
+    Args:
+        value: Texte fourni après une option numérique.
+
+    Returns:
+        La valeur convertie en `int`.
+
+    Raises:
+        argparse.ArgumentTypeError: Si la valeur n'est pas un entier ou est négative.
+    """
     try:
         parsed = int(value)
     except ValueError as error:
@@ -32,6 +63,36 @@ def _non_negative_int(value):
 
 
 def main(argv=None):
+    """Analyse les options et exécute un crawl ou un export Excel.
+
+    Les options `--max-pages`, `--workers` et `--retries` remplacent les valeurs
+    du fichier de configuration. `--export-excel` exporte la base configurée
+    puis termine sans lancer de crawl.
+
+    La sélection des sites suit ces règles :
+
+    - URL positionnelles : elles remplacent les `start_urls` du fichier.
+    - `--config` explicite : seuls les sites demandés ou définis dans le fichier
+      sont sélectionnés ; les URL en attente sont prioritaires, sinon le point
+      de départ est initialisé depuis les liens déjà enregistrés ou le start URL.
+    - Sans URL ni `--config` : toutes les files SQLite en attente sont reprises ;
+      si elles sont vides, un rappel invite à lancer avec `--config`.
+    - `--retry-failed` réactive explicitement les échecs dans le périmètre
+      sélectionné ; `--refresh` revalide les pages déjà enregistrées.
+
+    Les gestionnaires de logs créés sont toujours détachés et fermés en fin
+    d'exécution. Les erreurs utilisateur, réseau et stockage sont converties
+    en erreur CLI avec le code 1 ; une interruption clavier utilise le code 130.
+
+    Args:
+        argv: Arguments à analyser. Si `None`, utilise `sys.argv`.
+
+    Returns:
+        `None` après un export réussi, ou après un crawl achevé/sans travail.
+
+    Raises:
+        SystemExit: Pour une erreur d'arguments ou une erreur d'exécution CLI.
+    """
     cli = argparse.ArgumentParser(
         description=(
             "Sans --config, reprend les sites présents dans la file SQLite. "

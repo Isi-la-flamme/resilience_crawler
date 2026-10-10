@@ -1,3 +1,5 @@
+"""Lectures en lecture seule des bases locales pour le portail Open Data."""
+
 import re
 import sqlite3
 from pathlib import Path
@@ -15,6 +17,12 @@ PDF_SNIPPET_END = "\ue001"
 
 
 def list_sites(pages_database, pdf_database):
+    """Fusionne les sites présents dans la base de pages et l'index PDF.
+
+    Les URL exclues (`pricing` et `token`) ne contribuent pas aux totaux. Les
+    droits sont explicitement signalés comme non évalués ; cette fonction ne
+    consulte jamais les sites sources.
+    """
     pages_database = _require_database(pages_database, "base de pages")
     pdf_database = _require_database(pdf_database, "index PDF")
     pages_connection = _connect_readonly(pages_database)
@@ -62,6 +70,23 @@ def list_sites(pages_database, pdf_database):
 
 
 def list_pages(database, query=None, site=None, limit=20, offset=0):
+    """Recherche et pagine les pages nettoyées stockées localement.
+
+    Tous les termes sont combinés avec AND et cherchés dans le titre ou le
+    texte. Le résultat contient un extrait contextuel et les termes destinés
+    à la surbrillance côté interface.
+
+    Args:
+        database: Fichier SQLite nettoyé.
+        query: Recherche facultative, limitée par `_terms`.
+        site: Hôte ou URL HTTPS du site à filtrer.
+        limit: Nombre maximal de résultats.
+        offset: Index de départ pour la pagination.
+
+    Returns:
+        Métadonnées de pagination, état des droits, termes correspondants et
+        liste d'items synthétiques.
+    """
     database = _require_database(database, "base de pages")
     terms = _terms(query)
     filters = []
@@ -149,6 +174,10 @@ def list_pages(database, query=None, site=None, limit=20, offset=0):
 
 
 def get_page(database, page_id):
+    """Retourne le texte intégral local d'une page, ou `None` si absente.
+
+    Le texte n'est pas tronqué. Les URL exclues restent invisibles à l'API.
+    """
     database = _require_database(database, "base de pages")
     connection = _connect_readonly(database)
     try:
@@ -177,6 +206,12 @@ def get_page(database, page_id):
 
 
 def list_documents(database, query=None, site=None, limit=20, offset=0):
+    """Recherche et pagine les documents de l'index FTS5 local.
+
+    Avec une requête, l'index renvoie les correspondances classées par BM25 ;
+    sans requête, les documents sont ordonnés par date de collecte. Les
+    extraits FTS sont nettoyés de leurs marqueurs internes avant retour.
+    """
     database = _require_database(database, "index PDF")
     terms = _terms(query)
     filters = []
@@ -257,6 +292,11 @@ def list_documents(database, query=None, site=None, limit=20, offset=0):
 
 
 def get_document(database, document_id):
+    """Retourne le texte extrait intégral d'un document indexé, ou `None`.
+
+    Cette fonction sert le contenu déjà enregistré localement et n'ouvre pas
+    le PDF ni son URL source.
+    """
     database = _require_database(database, "index PDF")
     connection = _connect_readonly(database)
     try:
@@ -290,6 +330,7 @@ def get_document(database, document_id):
 
 
 def _require_database(path, description):
+    """Résout un chemin de base et lève une erreur explicite s'il est absent."""
     path = Path(path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"{description} introuvable : {path}")
@@ -297,6 +338,7 @@ def _require_database(path, description):
 
 
 def _connect_readonly(path):
+    """Ouvre SQLite en lecture seule et enregistre le filtre d'URL exclue."""
     connection = sqlite3.connect(
         f"{path.as_uri()}?mode=ro",
         uri=True,
@@ -307,11 +349,13 @@ def _connect_readonly(path):
 
 
 def _is_excluded_url(url):
+    """Retourne 1 si le segment terminal vaut `pricing` ou `token`, sinon 0."""
     final_path_segment = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
     return int(final_path_segment.lower() in {"pricing", "token"})
 
 
 def _contextual_excerpt(text, total_length, match_position):
+    """Ajoute les ellipses de contexte adaptées à un extrait de résultat."""
     if not text:
         return ""
     start_position = max(0, match_position - 351) if match_position else 0
@@ -321,6 +365,14 @@ def _contextual_excerpt(text, total_length, match_position):
 
 
 def _terms(query):
+    """Valide et tokenise une recherche textuelle pour l'API locale.
+
+    Les requêtes vides deviennent une liste vide ; les recherches non vides
+    sont limitées à 200 caractères et dix mots.
+
+    Raises:
+        ValueError: Si la requête ne contient aucun mot ou dépasse ses limites.
+    """
     if query is None:
         return []
     query = query.strip()
@@ -337,11 +389,13 @@ def _terms(query):
 
 
 def _site_start_url(site):
+    """Convertit le filtre de site en URL HTTPS canonique de départ."""
     host = _site_host(site)
     return f"https://{host}/"
 
 
 def _site_host(site):
+    """Valide un nom d'hôte ou une URL HTTPS sans chemin applicatif."""
     site = site.strip()
     parsed = urlsplit(site if "://" in site else f"https://{site}")
     if (
@@ -358,4 +412,5 @@ def _site_host(site):
 
 
 def _escape_like(term):
+    """Échappe les caractères spéciaux LIKE pour une recherche littérale."""
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")

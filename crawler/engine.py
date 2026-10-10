@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 
 
 class Crawler:
+    """Explore un site, extrait son contenu et persiste les résultats localement.
+
+    La portée d'un crawler est l'hôte du `start_url` et ses sous-domaines. Les
+    liens/images hors portée, les routes exclues et les chemins interdits par
+    `robots.txt` ne sont pas traités. Un crawler peut posséder sa base ou
+    partager une instance de `CrawlDatabase` avec d'autres sites.
+    """
+
     def __init__(
         self,
         start_url,
@@ -50,6 +58,30 @@ class Crawler:
         database=None,
         refresh=False,
     ):
+        """Configure un site et ses dépendances de collecte.
+
+        Args:
+            start_url: URL HTTP(S) de départ et racine de portée.
+            max_pages: Maximum de pages traitées par site et par exécution.
+            delay: Intervalle minimal entre requêtes vers le même hôte.
+            timeout: Timeout réseau en secondes.
+            retries: Nombre de nouvelles tentatives réseau.
+            max_response_bytes: Taille maximale d'une réponse ordinaire.
+            workers: Capacité du pool partagé lors de `crawl_many`.
+            image_batch_size: Téléchargements d'images simultanés par page.
+            image_dir: Racine locale des images.
+            documents_dir: Racine locale des documents.
+            crawler_name: Valeur stockée avec chaque page.
+            database_flush_interval: Fréquence maximale de vidage des pages.
+            sleep: Fonction de pause injectable, notamment pour les tests.
+            fetcher: Fetcher HTTP injectable ; sinon un `Fetcher` est créé.
+            database: Base partagée facultative. Si omise, une base mémoire est
+                créée et fermée par ce crawler.
+            refresh: Revalide les pages déjà enregistrées à l'aide des validateurs HTTP.
+
+        Raises:
+            ValueError: Si l'URL ou une limite numérique est invalide.
+        """
         if max_pages < 1 or workers < 1 or image_batch_size < 1:
             raise ValueError("max_pages, workers et image_batch_size doivent être positifs.")
         if delay < 0 or timeout <= 0 or retries < 0:
@@ -93,6 +125,11 @@ class Crawler:
         self._robots: RobotFileParser = RobotFileParser()
 
     def crawl(self):
+        """Lance ce crawler seul et renvoie ses pages, erreurs et compteurs.
+
+        Une base créée par ce crawler est fermée même si l'exploration échoue ;
+        une base injectée reste la propriété de l'appelant.
+        """
         try:
             return self._crawl()
         finally:
@@ -100,10 +137,30 @@ class Crawler:
                 self.database.close()
 
     def _crawl(self):
+        """Délègue l'exécution au moteur multi-site pour un seul crawler."""
         return self.crawl_many([self])[0]
 
     @classmethod
     def crawl_many(cls, crawlers):
+        """Exécute plusieurs sites dans un pool partagé et une base commune.
+
+        Les doublons de `start_url` sont supprimés en conservant le premier
+        crawler. Les robots.txt sont lus avant planification ; les pages sont
+        vidées périodiquement en base. Une interruption arrête l'ajout de
+        tâches, attend les tâches actives, persiste le travail terminé, puis
+        relance `KeyboardInterrupt`.
+
+        Args:
+            crawlers: Itérable de `Crawler` qui partagent la même base.
+
+        Returns:
+            Un dictionnaire de résultat par site dans l'ordre conservé.
+
+        Raises:
+            ValueError: Si les instances utilisent des bases différentes.
+            KeyboardInterrupt: Après persistance du travail terminé en cas
+                d'interruption clavier.
+        """
         crawlers_by_start_url = {}
         for crawler in crawlers:
             crawlers_by_start_url.setdefault(crawler.start_url, crawler)
@@ -164,6 +221,7 @@ class Crawler:
 
     @staticmethod
     def _init_state(crawler):
+        """Initialise la file et les compteurs d'exécution d'un crawler."""
         crawler.database.enqueue(crawler.start_url, [crawler.start_url])
         if crawler.refresh:
             crawler.database.queue_pages_for_refresh(crawler.start_url)
@@ -186,14 +244,19 @@ class Crawler:
 
     @staticmethod
     def _schedule_available(states, active, executor, max_workers):
-        """Remplit le pool tant qu'il reste de la place et des URLs éligibles."""
+        """Remplit le pool jusqu'à sa capacité ou l'absence d'URL admissible."""
         while len(active) < max_workers:
             if not Crawler._schedule_one_round(states, active, executor):
                 break
 
     @staticmethod
     def _schedule_one_round(states, active, executor):
-        """Une passe sur tous les états. Retourne True si une URL a été soumise ou consommée."""
+        """Réserve au plus une URL admissible et la soumet au pool.
+
+        Les URL hors portée, exclues ou interdites par robots sont consommées
+        sans téléchargement. Le booléen de retour signale toute progression,
+        y compris la consommation d'une URL ignorée.
+        """
         progress = False
         for state in states:
             crawler = state["crawler"]
@@ -240,6 +303,7 @@ class Crawler:
 
     @staticmethod
     def _flush_due(states, now):
+        """Persiste les lots dont l'intervalle de vidage est écoulé."""
         for state in states:
             if (
                 state["pending_pages"]
@@ -250,6 +314,11 @@ class Crawler:
 
     @staticmethod
     def _flush_all_pending(states):
+        """Persiste immédiatement tous les lots en mémoire.
+
+        Returns:
+            `True` si au moins un lot a été vidé ; sinon `False`.
+        """
         flushed = False
         for state in states:
             if state["pending_pages"]:
@@ -260,6 +329,7 @@ class Crawler:
 
     @staticmethod
     def _next_wait_timeout(states, now):
+        """Retourne le délai avant le prochain vidage programmé, s'il y en a."""
         deadlines = [
             max(0, state["crawler"].database_flush_interval - (now - state["last_flush"]))
             for state in states
@@ -269,6 +339,7 @@ class Crawler:
 
     @staticmethod
     def _drain_completed(completed, active, states):
+        """Traite les futures terminées et met à jour file et résultats."""
         for future in completed:
             state, url = active.pop(future)
             crawler = state["crawler"]
@@ -323,6 +394,7 @@ class Crawler:
 
     @staticmethod
     def _handle_http_error(state, url, error):
+        """Traduit un HTTPError en statut de file et éventuel résultat d'erreur."""
         crawler = state["crawler"]
         if error.code in {404, 410}:
             crawler.database.set_url_status(crawler.start_url, url, "skipped")
@@ -334,6 +406,7 @@ class Crawler:
 
     @staticmethod
     def _collect_results(states):
+        """Vide les dernières pages et construit un résultat par site."""
         results = []
         for state in states:
             if state["pending_pages"]:
@@ -352,6 +425,7 @@ class Crawler:
         return results
 
     def _flush_pages(self, pending_pages):
+        """Persiste un lot puis le vide de la liste mutable en mémoire."""
         count = len(pending_pages)
         self.database.save_pages(self.start_url, pending_pages)
         pending_pages.clear()
@@ -359,6 +433,15 @@ class Crawler:
 
 
     def _process_url(self, url):
+        """Télécharge une URL et la convertit en page, document ou élément ignoré.
+
+        En mode refresh, joint les validateurs enregistrés et traite HTTP 304
+        comme inchangé. Cette méthode est exécutée par un thread du pool.
+
+        Returns:
+            Tuple `(page, discovered_urls, validators, not_modified)`. Pour un
+            document ou un type ignoré, `page` vaut `None` et les liens sont vides.
+        """
         self._wait_for_delay(url)
         cached_page = (
             self.database.page_cache(self.start_url, url)
@@ -401,6 +484,7 @@ class Crawler:
         return page, discovered_urls, validators, False
 
     def _classify(self, url, content_type):
+        """Classe une réponse HTTP en document, page HTML ou type ignoré."""
         if document_extension(url, content_type) is not None:
             return "document"
         if content_type == "text/html":
@@ -408,6 +492,7 @@ class Crawler:
         return "skip"
 
     def _save_document(self, url, content_type, body):
+        """Écrit un document reconnu sur disque et enregistre ses métadonnées."""
         document = self.document_downloader.save(
             url,
             content_type,
@@ -418,6 +503,12 @@ class Crawler:
         self.database.save_document(self.start_url, document)
 
     def _build_html_page(self, url, body, charset):
+        """Analyse le HTML, filtre les ressources et télécharge ses images.
+
+        Returns:
+            Couple `(page, links)`, où `page` contient les champs prêts pour la
+            base et `links` les URL internes admissibles à ajouter à la file.
+        """
         html = body.decode(charset or "utf-8", errors="replace")
         with metrics.measure("parse"):
             title, raw_links, raw_images, published_at, content = PageParser.parse_html(html)
@@ -440,6 +531,12 @@ class Crawler:
 
     
     def _download_images(self, image_urls):
+        """Télécharge les images non présentes en base, en préservant l'ordre.
+
+        Les images déjà en cours ou téléchargées ne sont pas redemandées. Le
+        nombre de téléchargements concurrents est borné par `image_batch_size`.
+        Le retour contient uniquement les chemins effectivement disponibles.
+        """
         downloaded_paths = {}
         pending_urls = []
         for image_url in image_urls:
@@ -466,6 +563,11 @@ class Crawler:
         return [downloaded_paths[url] for url in image_urls if url in downloaded_paths]
 
     def _download_image(self, image_url):
+        """Télécharge une image et synchronise son résultat avec SQLite.
+
+        Les erreurs HTTP et réseau sont enregistrées dans la table `images` et
+        n'interrompent pas le téléchargement des autres images.
+        """
         try:
             with metrics.measure("image"):
                 image_path = self.image_downloader.download(image_url)
@@ -495,6 +597,12 @@ class Crawler:
     
 
     def _normalize_resources(self, page_url, resources, same_scope):
+        """Résout et déduplique les ressources, en retirant celles hors politique.
+
+        `same_scope` applique la portée hôte + sous-domaines du site. Les URL
+        non HTTP(S), invalides, externes ou dont le dernier segment vaut
+        `pricing` ou `token` sont omises.
+        """
         normalized_urls = []
         for resource in resources:
             try:
@@ -514,10 +622,17 @@ class Crawler:
 
     @staticmethod
     def _is_excluded_url(url):
+        """Indique si le dernier segment de chemin est `pricing` ou `token`."""
         final_path_segment = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
         return final_path_segment.lower() in {"pricing", "token"}
 
     def _load_robots(self):
+        """Télécharge et analyse `/robots.txt` pour l'origine de départ.
+
+        En cas d'absence, d'erreur HTTP/réseau ou de redirection hors portée,
+        applique le comportement actuel permissif (allow-all) et journalise la
+        raison.
+        """
         parts = urlsplit(self.start_url)
         robots_url = urlunsplit((parts.scheme, parts.netloc, "/robots.txt", "", ""))
         parser = RobotFileParser()
@@ -554,6 +669,12 @@ class Crawler:
         return parser
 
     def _wait_for_delay(self, url):
+        """Applique le délai configuré entre requêtes vers le même hôte.
+
+        Le verrou protège l'horodatage partagé lorsque les workers sont
+        concurrents. Le temps d'attente est également enregistré dans les
+        métriques.
+        """
         with metrics.measure("wait"):
             host = urlsplit(url).hostname or ""
             with self._rate_limit_lock:
@@ -565,6 +686,16 @@ class Crawler:
                 self._next_request_at[host] = time.monotonic() + self.delay
 
     def _normalize_url(self, url, same_scope=True):
+        """Valide une URL HTTP(S), retire le fragment et normalise son origine.
+
+        Si `same_scope` est vrai, l'hôte doit être le domaine de départ ou l'un
+        de ses sous-domaines. Le chemin et la query sont préservés ; le chemin
+        vide devient `/`.
+
+        Raises:
+            ValueError: Si l'URL n'est pas HTTP(S), n'a pas d'hôte ou est hors
+                de la portée du crawler.
+        """
         parts = urlsplit(url)
         if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
             raise ValueError("L'URL doit utiliser HTTP ou HTTPS.")
@@ -580,6 +711,12 @@ class Crawler:
         return normalized
 
     def _is_in_scope_url(self, url):
+        """Retourne si une URL HTTP(S) appartient à l'hôte ou sous-domaine racine.
+
+        La comparaison des frontières utilise `.<domaine>` afin que, par
+        exemple, `notexample.com` ne soit pas considéré comme sous-domaine de
+        `example.com`.
+        """
         try:
             parts = urlsplit(url)
             hostname = parts.hostname

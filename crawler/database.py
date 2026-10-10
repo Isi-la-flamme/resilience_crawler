@@ -13,7 +13,22 @@ logger = logging.getLogger(__name__)
 
 
 class CrawlDatabase:
+    """Accès thread-safe à la base SQLite du crawler.
+
+    La base conserve les URL et leurs statuts, les pages HTML, les documents et
+    l'état des images. Les écritures utilisent des transactions SQLite ; WAL
+    permet aux lecteurs d'accéder aux données pendant les écritures. Une
+    instance est destinée à être partagée par les workers d'un processus et
+    utilisée avec un gestionnaire de contexte.
+    """
+
     def __init__(self, path):
+        """Ouvre ou crée `path`, initialise le schéma et reprend les travaux.
+
+        Au démarrage, les URL interrompues en état `fetching` ainsi que les
+        téléchargements d'image `downloading` repassent en attente. Les URL déjà
+        persistées comme page ou document sont normalisées à `done`.
+        """
         database_path = Path(path)
         database_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -44,10 +59,12 @@ class CrawlDatabase:
             self._migrate_page_validators()
 
     def close(self):
+        """Ferme la connexion SQLite après les opérations en cours."""
         with self._lock:
             self._connection.close()
 
     def _create_tables(self):
+        """Crée les tables et index manquants, puis migre l'ancien schéma."""
         with self._lock, self._connection:
             self._connection.executescript("""
                 CREATE TABLE IF NOT EXISTS url_queue (
@@ -100,6 +117,7 @@ class CrawlDatabase:
             self._migrate_pages()
 
     def _migrate_page_validators(self):
+        """Ajoute les colonnes de validateurs HTTP absentes sur `pages`."""
         columns = {
             row[1] for row in self._connection.execute("PRAGMA table_info(pages)")
         }
@@ -108,6 +126,12 @@ class CrawlDatabase:
                 self._connection.execute(f"ALTER TABLE pages ADD COLUMN {column} TEXT")
 
     def _migrate_pages(self):
+        """Migre les anciens schémas `pages` sans supprimer leur contenu.
+
+        Les schémas récents reçoivent au besoin une empreinte URL. Les formes
+        historiques sont copiées dans une table au schéma courant avant
+        remplacement.
+        """
         columns = {
             row[1] for row in self._connection.execute("PRAGMA table_info(pages)")
         }
@@ -185,9 +209,15 @@ class CrawlDatabase:
 
     @staticmethod
     def page_url_hash(url):
+        """Retourne l'empreinte SHA-256 stable utilisée pour une page."""
         return full_url_hash(url)
 
     def enqueue(self, start_url, urls):
+        """Ajoute sans doublon des URL à la file d'un site.
+
+        Une clé déjà présente conserve son statut : cet appel ne réactive donc
+        pas les entrées `done`, `failed` ou `skipped`.
+        """
         with self._lock, self._connection:
             self._connection.executemany(
                 "INSERT OR IGNORE INTO url_queue(start_url, url) VALUES (?, ?)",
@@ -195,6 +225,12 @@ class CrawlDatabase:
             )
 
     def queued_start_urls(self, start_urls=None):
+        """Liste les sites ayant au moins une URL réclamable en état `queued`.
+
+        Les URL déjà enregistrées comme page ou document sont exclues. Si
+        `start_urls` est fourni, seuls ces sites sont considérés ; une liste
+        vide renvoie immédiatement une liste vide.
+        """
         filters = ["queue.status='queued'"]
         parameters = []
         if start_urls is not None:
@@ -225,6 +261,20 @@ class CrawlDatabase:
         return [row[0] for row in rows]
 
     def ensure_start_url_queued(self, start_url):
+        """Assure un point de reprise pour un site, sans réveiller ses échecs.
+
+        Si une URL est déjà en attente, ne modifie pas la file. Sinon, reconstruit
+        les entrées absentes depuis les liens des pages enregistrées ; si aucune
+        page n'existe, ajoute le `start_url`. Les entrées déjà présentes dans un
+        état terminal restent inchangées.
+
+        Returns:
+            Nombre de nouvelles entrées ajoutées à `url_queue`.
+
+        Raises:
+            ValueError: Si les liens JSON d'une page ne sont pas une liste.
+            json.JSONDecodeError: Si une valeur `links_json` est mal formée.
+        """
         if self.queued_start_urls([start_url]):
             return 0
         with self._lock:
@@ -255,6 +305,14 @@ class CrawlDatabase:
         return cursor.rowcount
 
     def retry_failed_urls(self, start_urls=None):
+        """Remet explicitement les URL `failed` en attente.
+
+        Le filtre facultatif limite l'opération aux sites listés. L'état d'erreur
+        est effacé ; les entrées `skipped`, `blocked` ou `done` ne changent pas.
+
+        Returns:
+            Nombre de lignes dont le statut est repassé à `queued`.
+        """
         if start_urls == []:
             return 0
         filters = ["status='failed'"]
@@ -273,6 +331,15 @@ class CrawlDatabase:
         return cursor.rowcount
 
     def claim_next(self, start_url, include_existing=False):
+        """Réserve atomiquement la prochaine URL en attente pour un site.
+
+        Une URL sélectionnée passe à `fetching` avant d'être retournée, ce qui
+        empêche deux workers de la même instance de la réclamer simultanément.
+        Sauf en mode refresh, pages et documents déjà stockés sont exclus.
+
+        Returns:
+            URL réservée, ou `None` si aucune URL admissible n'est disponible.
+        """
         with self._lock, self._connection:
             existing_filter = "" if include_existing else """
                      AND NOT EXISTS (
@@ -301,6 +368,7 @@ class CrawlDatabase:
             return url
 
     def queue_pages_for_refresh(self, start_url):
+        """Remet les pages enregistrées d'un site dans la file pour validation."""
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT OR IGNORE INTO url_queue(start_url, url, status)
@@ -318,6 +386,7 @@ class CrawlDatabase:
             )
 
     def page_cache(self, start_url, url):
+        """Retourne HTML et validateurs d'une page, ou `None` si absente."""
         with self._lock:
             row = self._connection.execute(
                 "SELECT html, etag, last_modified FROM pages WHERE start_url=? AND url=?",
@@ -328,6 +397,7 @@ class CrawlDatabase:
         return {"html": row[0], "etag": row[1], "last_modified": row[2]}
 
     def mark_page_unchanged(self, start_url, url, validators):
+        """Actualise les validateurs d'une page 304 et marque son URL `done`."""
         with self._lock, self._connection:
             self._connection.execute(
                 """UPDATE pages SET etag=COALESCE(?, etag),
@@ -341,9 +411,20 @@ class CrawlDatabase:
             )
 
     def save_page(self, start_url, page, discovered_urls):
+        """Persiste une page et ses liens découverts via `save_pages`."""
         self.save_pages(start_url, [(page, discovered_urls)])
 
     def save_pages(self, start_url, page_results):
+        """Enregistre transactionnellement un lot de pages et leurs liens.
+
+        Chaque page est insérée ou mise à jour ; ses données de sortie reçoivent
+        `id` et `crawled_at`. L'URL de page passe à `done`, et les nouveaux liens
+        sont insérés sans réinitialiser les statuts existants.
+
+        Args:
+            start_url: Site auquel les pages appartiennent.
+            page_results: Itérable de couples `(page, discovered_urls)`.
+        """
         now = datetime.now(timezone.utc).isoformat()
 
         with metrics.measure("db"):
@@ -397,6 +478,7 @@ class CrawlDatabase:
                     )
 
     def save_document(self, start_url, document):
+        """Insère ou actualise les métadonnées d'un document et son statut."""
         downloaded_at = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connection:
             self._connection.execute(
@@ -430,6 +512,7 @@ class CrawlDatabase:
             )
 
     def has_document(self, start_url, url):
+        """Indique si un document de cette URL est enregistré pour ce site."""
         with self._lock:
             row = self._connection.execute(
                 "SELECT 1 FROM documents WHERE start_url=? AND url=?",
@@ -438,6 +521,7 @@ class CrawlDatabase:
         return row is not None
 
     def set_url_status(self, start_url, url, status, error=None):
+        """Met à jour le statut et le détail d'erreur d'une URL existante."""
         with self._lock, self._connection:
             self._connection.execute(
                 "UPDATE url_queue SET status=?, error=? WHERE start_url=? AND url=?",
@@ -445,6 +529,7 @@ class CrawlDatabase:
             )
 
     def page_count(self, start_url):
+        """Compte les pages enregistrées pour un site de départ."""
         with self._lock:
             row = self._connection.execute(
                 "SELECT COUNT(*) FROM pages WHERE start_url=?",
@@ -453,6 +538,7 @@ class CrawlDatabase:
         return row[0]
 
     def queued_url_count(self, start_url, url):
+        """Compte les lignes de file correspondant exactement à cette URL."""
         with self._lock:
             row = self._connection.execute(
                 "SELECT COUNT(*) FROM url_queue WHERE start_url=? AND url=?",
@@ -461,6 +547,15 @@ class CrawlDatabase:
         return row[0]
 
     def claim_image(self, url):
+        """Réserve une image si elle n'est pas déjà téléchargée et disponible.
+
+        Les images déjà en cours de téléchargement ou dont le fichier local
+        existe sont conservées. Une image absente ou en échec passe à
+        `downloading`.
+
+        Returns:
+            `True` si l'appelant doit effectuer le téléchargement, sinon `False`.
+        """
         with self._lock, self._connection:
             row = self._connection.execute(
                 "SELECT status, local_path FROM images WHERE url=?",
@@ -479,6 +574,7 @@ class CrawlDatabase:
             return True
 
     def finish_image(self, url, local_path):
+        """Marque l'image téléchargée et mémorise son chemin local."""
         with self._lock, self._connection:
             self._connection.execute(
                 "UPDATE images SET status='downloaded', local_path=?, error=NULL WHERE url=?",
@@ -486,6 +582,7 @@ class CrawlDatabase:
             )
 
     def image_path(self, url):
+        """Retourne le chemin d'une image valide, ou `None` si indisponible."""
         with self._lock:
             row = self._connection.execute(
                 "SELECT local_path FROM images WHERE url=? AND status='downloaded'",
@@ -497,6 +594,7 @@ class CrawlDatabase:
         return path if path.is_file() else None
 
     def fail_image(self, url, error):
+        """Enregistre le statut `failed` et le message d'échec d'une image."""
         with self._lock, self._connection:
             self._connection.execute(
                 "UPDATE images SET status='failed', error=? WHERE url=?",
@@ -504,6 +602,7 @@ class CrawlDatabase:
             )
 
     def summary(self):
+        """Retourne les totaux des pages, images, documents et statuts de file."""
         with self._lock:
             counts = dict(self._connection.execute(
                 "SELECT status, COUNT(*) FROM url_queue GROUP BY status"
@@ -523,8 +622,10 @@ class CrawlDatabase:
         }
 
     def __enter__(self):
+        """Retourne cette instance pour un bloc `with`."""
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        """Ferme la base à la sortie du bloc, sans absorber les exceptions."""
         self.close()
         return False

@@ -4,6 +4,13 @@ from .json_logging import JsonLineFormatter
 
 
 def configure_logging(config):
+    """Ajoute les gestionnaires console et JSONL au logger racine.
+
+    `config` doit contenir `log_path` (chemin) et `log_level` (nom standard
+    d'un niveau `logging`). Le répertoire du journal est créé si nécessaire.
+    Les gestionnaires sont retournés pour permettre à l'appelant de les retirer
+    et fermer après le crawl.
+    """
     config["log_path"].parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(config["log_path"], encoding="utf-8")
     file_handler.setFormatter(JsonLineFormatter())

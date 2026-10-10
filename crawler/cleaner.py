@@ -1,3 +1,5 @@
+"""Nettoyage hors ligne du HTML collecté et production d'une base texte."""
+
 import hashlib
 import html
 import logging
@@ -33,6 +35,27 @@ TEXT_WHITESPACE = re.compile(r"\s+")
 
 
 def clean_database(source_path, output_path):
+    """Crée une base de texte nettoyée sans modifier la base source.
+
+    Le traitement identifie les blocs récurrents par site, retire les éléments
+    de navigation et boilerplate, puis conserve uniquement les pages dont le
+    texte final contient au moins `MIN_CLEANED_TEXT_LENGTH` caractères. La
+    sortie doit être nouvelle ; elle est construite dans un fichier temporaire
+    et publiée atomiquement après validation.
+
+    Args:
+        source_path: Base crawler contenant la table `pages` et le HTML original.
+        output_path: Nouveau chemin SQLite de sortie.
+
+    Returns:
+        Compteurs de pages nettoyées, blocs répétitifs et rapports par site.
+
+    Raises:
+        ValueError: Si la source et la sortie désignent le même fichier.
+        FileNotFoundError: Si la base source n'existe pas.
+        FileExistsError: Si la sortie existe déjà.
+        sqlite3.Error: Si la base source ne respecte pas le schéma attendu.
+    """
     source_path = Path(source_path).resolve()
     output_path = Path(output_path).resolve()
     if source_path == output_path:
@@ -95,6 +118,7 @@ def clean_database(source_path, output_path):
 
 
 def _create_output_schema(connection):
+    """Crée les tables de pages nettoyées, de boilerplate et de rapports."""
     connection.executescript("""
         PRAGMA journal_mode=DELETE;
         CREATE TABLE pages (
@@ -143,6 +167,13 @@ def _create_output_schema(connection):
 
 
 def _detect_repeated_blocks(source, target):
+    """Repère les blocs HTML qui se répètent suffisamment sur chaque site.
+
+    Le HTML est analysé avec `BodyHTMLCleaner`; une empreinte normalisée
+    identifie chaque bloc candidat. Un bloc est retenu s'il apparaît sur au
+    moins `max(MIN_REPEATED_PAGES, ceil(REPEAT_THRESHOLD * pages_du_site))`
+    pages.
+    """
     cursor = source.execute(
         "SELECT start_url, url, html FROM pages ORDER BY start_url, url"
     )
@@ -202,6 +233,7 @@ def _detect_repeated_blocks(source, target):
 
 
 def _load_repeated_blocks(connection):
+    """Charge les signatures répétitives sous forme `{site: set(signatures)}`."""
     blocks = {}
     for start_url, signature in connection.execute(
         "SELECT start_url, signature FROM boilerplate_blocks"
@@ -211,6 +243,12 @@ def _load_repeated_blocks(connection):
 
 
 def _clean_pages(source, target, repeated_blocks):
+    """Nettoie les pages une par une et remplit la table `pages` de sortie.
+
+    Les pages sous le seuil de texte restent absentes de la table, mais sont
+    tout de même comptabilisées dans les statistiques du site. Les mises à jour
+    des rapports sont vidées par lots afin de limiter la mémoire.
+    """
     cursor = source.execute("""
         SELECT id, start_url, url, url_hash, title, published_at, content,
                html, crawler_name, links_json, images_json, crawled_at
@@ -276,6 +314,7 @@ def _clean_pages(source, target, repeated_blocks):
 
 
 def _flush_site_report_totals(target, report_totals):
+    """Ajoute au rapport les agrégats temporaires puis vide leur dictionnaire."""
     target.executemany(
         """UPDATE site_report
            SET cleaned_pages=cleaned_pages+?,
@@ -293,6 +332,7 @@ def _flush_site_report_totals(target, report_totals):
 
 
 def _write_site_reports(target, site_page_counts):
+    """Initialise une ligne de rapport par site avec ses pages source et blocs."""
     block_counts = dict(target.execute(
         "SELECT start_url, COUNT(*) FROM boilerplate_blocks GROUP BY start_url"
     ).fetchall())
@@ -308,7 +348,16 @@ def _write_site_reports(target, site_page_counts):
 
 
 class BodyHTMLCleaner(HTMLParser):
+    """Retire les zones exclues et détecte/élimine les blocs récurrents.
+
+    Les balises candidates sont conservées temporairement afin de calculer une
+    signature textuelle normalisée. Le HTML restitué garde le markup original
+    hors blocs supprimés ; les entités et le texte sont rééchappés sans
+    double-encodage.
+    """
+
     def __init__(self, repeated_signatures=()):
+        """Configure les signatures à retirer et réinitialise l'état du parseur."""
         super().__init__(convert_charrefs=True)
         self.repeated_signatures = repeated_signatures
         self._excluded_stack = []
@@ -318,6 +367,12 @@ class BodyHTMLCleaner(HTMLParser):
         self._removed_blocks = 0
 
     def clean(self, html_text):
+        """Nettoie un document HTML et retourne HTML, candidats et compte supprimé.
+
+        Returns:
+            Tuple `(cleaned_html, candidates, removed_count)`. Chaque candidat
+            contient sa balise, son empreinte SHA-256 et un court échantillon.
+        """
         self.feed(html_text)
         self.close()
         while self._candidate_stack:
@@ -325,6 +380,7 @@ class BodyHTMLCleaner(HTMLParser):
         return "".join(self._output), self._candidates, self._removed_blocks
 
     def handle_starttag(self, tag, _attrs):
+        """Ouvre les zones exclues/candidates et conserve les balises utiles."""
         if self._excluded_stack:
             if tag not in VOID_TAGS:
                 self._excluded_stack.append(tag)
@@ -347,6 +403,7 @@ class BodyHTMLCleaner(HTMLParser):
             self._emit(self.get_starttag_text() or f"<{tag}>")
 
     def handle_endtag(self, tag):
+        """Ferme les états de balise en tolérant un HTML imparfaitement imbriqué."""
         if self._excluded_stack:
             matching_index = next(
                 (
@@ -378,6 +435,7 @@ class BodyHTMLCleaner(HTMLParser):
                     self._finish_candidate()
 
     def handle_data(self, data):
+        """Ajoute le texte au markup et aux candidats dans la limite configurée."""
         if self._excluded_stack:
             return
         for candidate in self._candidate_stack:
@@ -392,21 +450,31 @@ class BodyHTMLCleaner(HTMLParser):
         self._emit(html.escape(data, quote=False))
 
     def handle_entityref(self, name):
+        """Décode une référence nommée puis la traite comme texte normal."""
         self.handle_data(html.unescape(f"&{name};"))
 
     def handle_charref(self, name):
+        """Décode une référence numérique puis la traite comme texte normal."""
         self.handle_data(html.unescape(f"&#{name};"))
 
     def handle_comment(self, _data):
+        """Ignore les commentaires HTML."""
         return
 
     def _emit(self, markup):
+        """Ajoute du markup à la balise candidate active ou à la sortie."""
         if self._candidate_stack:
             self._candidate_stack[-1]["markup"].append(markup)
         else:
             self._output.append(markup)
 
     def _finish_candidate(self):
+        """Finalise le candidat supérieur et le conserve ou le supprime.
+
+        Les blocs supprimés sont propagés comme compteurs aux candidats parents
+        afin que le rapport ne compte pas plusieurs fois les mêmes suppressions
+        imbriquées.
+        """
         candidate = self._candidate_stack.pop()
         text = TEXT_WHITESPACE.sub(" ", "".join(candidate["text"])).strip()
         signature = None
