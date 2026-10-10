@@ -3,6 +3,7 @@ import threading
 import time
 
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from http.client import InvalidURL
 
 from pathlib import Path
 
@@ -379,11 +380,15 @@ class Crawler:
                 crawler.database.set_url_status(crawler.start_url, url, "skipped")
                 logger.info("Skipping document because downloads are disabled: %s", error)
                 continue
+            except InvalidURL as error:
+                crawler.database.set_url_status(crawler.start_url, url, "skipped")
+                logger.info("Skipping malformed URL %s: %s", url, error)
+                continue
             except OutOfScopeRedirectError as error:
                 crawler.database.set_url_status(crawler.start_url, url, "skipped")
                 logger.info("Skipping out-of-scope redirect for %s: %s", url, error)
                 continue
-            except (URLError, TimeoutError, OSError, ValueError) as error:
+            except (InvalidURL, URLError, TimeoutError, OSError, ValueError) as error:
                 crawler.database.set_url_status(crawler.start_url, url, "failed", str(error))
                 state["errors"].append({"url": url, "error": str(error)})
                 logger.warning("Failed fetch for %s after retries: %s", url, error)
@@ -642,8 +647,9 @@ class Crawler:
         """Résout et déduplique les ressources, en retirant celles hors politique.
 
         `same_scope` applique la portée hôte + sous-domaines du site. Les URL
-        non HTTP(S), invalides, externes ou dont le dernier segment vaut
-        `pricing` ou `token` sont omises.
+        non HTTP(S), invalides, externes, dont le dernier segment vaut
+        `pricing` ou `token`, ou qui répètent un segment `pricing`, `contact`
+        ou `token` sont omises.
         """
         normalized_urls = []
         for resource in resources:
@@ -680,9 +686,20 @@ class Crawler:
 
     @staticmethod
     def _is_excluded_url(url):
-        """Indique si le dernier segment de chemin est `pricing` ou `token`."""
-        final_path_segment = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
-        return final_path_segment.lower() in {"pricing", "token"}
+        """Applique les exclusions de routes `pricing`, `contact` et `token`.
+
+        Les routes qui finissent par `pricing` ou `token` restent exclues. Une
+        URL est aussi exclue si l'un de ces trois segments apparaît au moins
+        deux fois dans son chemin.
+        """
+        segments = [
+            segment.casefold()
+            for segment in urlsplit(url).path.split("/")
+            if segment
+        ]
+        if segments and segments[-1] in {"pricing", "token"}:
+            return True
+        return any(segments.count(tag) > 1 for tag in {"pricing", "contact", "token"})
 
     def _load_robots(self):
         """Télécharge et analyse `/robots.txt` pour l'origine de départ.
@@ -754,12 +771,24 @@ class Crawler:
             ValueError: Si l'URL n'est pas HTTP(S), n'a pas d'hôte ou est hors
                 de la portée du crawler.
         """
-        parts = urlsplit(url)
+        try:
+            parts = urlsplit(url)
+            port = parts.port
+        except ValueError as error:
+            raise ValueError(f"URL mal formée : {url}") from error
         if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
             raise ValueError("L'URL doit utiliser HTTP ou HTTPS.")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("Les identifiants intégrés aux URL ne sont pas acceptés.")
+        if parts.netloc.endswith(":"):
+            raise ValueError(f"Port manquant dans l'URL : {url}")
+        hostname = parts.hostname.lower()
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        netloc = f"{hostname}:{port}" if port is not None else hostname
         normalized = urlunsplit((
             parts.scheme.lower(),
-            parts.netloc.lower(),
+            netloc,
             parts.path or "/",
             parts.query,
             "",

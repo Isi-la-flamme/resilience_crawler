@@ -25,7 +25,8 @@ to the public internet.
 The pages database is prepared by `cleaner.py`; pages whose cleaned text is
 shorter than 500 characters are excluded there. The original crawl database is
 left unchanged. The API also hides pages and documents whose URL path ends
-with `pricing` or `token`, including those already present in older databases.
+with `pricing` or `token`, or repeats a `pricing`, `contact`, or `token` path
+segment, including records already present in older databases.
 
 ## Endpoints
 

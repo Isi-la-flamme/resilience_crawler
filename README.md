@@ -32,8 +32,8 @@ réutilisés.** Le statut des droits est actuellement `not_assessed` (« non
   lancement.
 - Actualisation des pages déjà collectées avec `--refresh` et validateurs HTTP
   conditionnels lorsque le serveur les fournit.
-- Exclusion des URL dont le dernier segment du chemin est `pricing` ou `token`,
-  à la découverte par le crawler et dans les résultats de l’API.
+- Exclusion des URL dont le dernier segment est `pricing` ou `token`, ou dont
+  le chemin répète l’un des segments `pricing`, `contact` ou `token`.
 - Enregistrement des pages HTML, images et documents désactivable
   indépendamment avec `--no-html`, `--no-images` et `--no-documents`.
 - Export Excel des pages, images et documents.
@@ -195,6 +195,12 @@ reconnus pour ce lancement. Les URL documentaires identifiées par leur extensio
 sont ignorées avant la requête ; si le document n’est reconnaissable qu’au type
 MIME, le crawler s’arrête après les en-têtes HTTP, sans lire le corps. Ces URL
 passent à l’état `skipped` et ne seront pas reprises automatiquement.
+
+Les URL contenant au moins deux segments de chemin identiques parmi `pricing`,
+`contact` et `token` sont ignorées avant toute requête et passent à l’état
+`skipped`. Les routes qui se terminent par `pricing` ou `token` restent
+également exclues, conformément à la règle existante. Une seule occurrence de
+`contact` n’est pas exclue.
 Au moins un type de contenu doit rester activé ; désactiver simultanément HTML,
 images et documents affiche une erreur claire avant le démarrage de la collecte.
 

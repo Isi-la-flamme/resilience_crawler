@@ -3,11 +3,12 @@ import tempfile
 import threading
 import time
 import unittest
-from concurrent.futures import wait as wait_for_futures
+from concurrent.futures import Future, wait as wait_for_futures
+from http.client import InvalidURL
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from crawler import Crawler, CrawlDatabase
 
@@ -43,8 +44,14 @@ class TestHandler(BaseHTTPRequestHandler):
         if self.path == "/redirect-target":
             type(self).out_of_scope_redirect_target_requests += 1
 
-        final_path_segment = self.path.rstrip("/").rsplit("/", 1)[-1].lower()
-        if final_path_segment in {"pricing", "token"}:
+        path_segments = [
+            segment.lower() for segment in self.path.split("/") if segment
+        ]
+        final_path_segment = path_segments[-1] if path_segments else ""
+        if (
+            final_path_segment in {"pricing", "token"}
+            or any(path_segments.count(tag) > 1 for tag in {"pricing", "contact", "token"})
+        ):
             type(self).excluded_route_requests.append(self.path)
 
         if self.path == "/robots.txt":
@@ -309,8 +316,37 @@ class CrawlerTests(unittest.TestCase):
                 crawler._normalize_url("https://example.org/page")
             with self.assertRaises(ValueError):
                 crawler._normalize_url("https://notexample.com/page")
+            with self.assertRaises(ValueError):
+                crawler._normalize_url("https://example.com:dircab/path")
+            with self.assertRaises(ValueError):
+                crawler._normalize_url("https://dircab@example.com/path")
         finally:
             crawler.database.close()
+
+    def test_malformed_http_url_is_skipped_without_crashing_crawl(self):
+        url = "https://primature.gov.bf/tag/industrialisation/contact/"
+        future = Future()
+        future.set_exception(InvalidURL("nonnumeric port: 'dircab@primature.gov.bf'"))
+        crawler = Mock(refresh=False, start_url="https://primature.gov.bf/")
+        state = {
+            "crawler": crawler,
+            "active_count": 1,
+            "processed_count": 0,
+            "errors": [],
+        }
+
+        Crawler._drain_completed(
+            {future},
+            {future: (state, url)},
+            [state],
+        )
+
+        crawler.database.set_url_status.assert_called_once_with(
+            crawler.start_url,
+            url,
+            "skipped",
+        )
+        self.assertEqual(state["errors"], [])
 
     def test_resolves_bare_in_scope_hostname_href_to_root_url(self):
         crawler = Crawler("https://example.com/", sleep=lambda _: None)
@@ -463,6 +499,9 @@ class CrawlerTests(unittest.TestCase):
                     self.base_url + "/article/pricing/",
                     self.base_url
                     + "/category/actualite/audience/page/4/pricing//pricing",
+                    self.base_url + "/pricing/plans/pricing",
+                    self.base_url + "/contact/aide/contact/form",
+                    self.base_url + "/token/session/token/info",
                 ]
                 database.enqueue(start_url, excluded_urls)
                 result = self.make_crawler(
@@ -497,6 +536,18 @@ class CrawlerTests(unittest.TestCase):
             ],
             "skipped",
         )
+        for path in (
+            "/pricing/plans/pricing",
+            "/contact/aide/contact/form",
+            "/token/session/token/info",
+        ):
+            self.assertEqual(statuses[self.base_url + path], "skipped")
+
+    def test_single_contact_path_segment_is_not_excluded(self):
+        self.assertFalse(Crawler._is_excluded_url("https://example.org/contact"))
+        self.assertTrue(Crawler._is_excluded_url(
+            "https://example.org/a/contact/b/CONTACT"
+        ))
 
     def test_retries_transient_server_error(self):
         TestHandler.transient_requests = 0

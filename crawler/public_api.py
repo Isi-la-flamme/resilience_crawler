@@ -19,9 +19,10 @@ PDF_SNIPPET_END = "\ue001"
 def list_sites(pages_database, pdf_database):
     """Fusionne les sites présents dans la base de pages et l'index PDF.
 
-    Les URL exclues (`pricing` et `token`) ne contribuent pas aux totaux. Les
-    droits sont explicitement signalés comme non évalués ; cette fonction ne
-    consulte jamais les sites sources.
+    Les URL terminées par `pricing` ou `token`, ou répétant un segment
+    `pricing`, `contact` ou `token`, ne contribuent pas aux totaux. Les droits
+    sont explicitement signalés comme non évalués ; cette fonction ne consulte
+    jamais les sites sources.
     """
     pages_database = _require_database(pages_database, "base de pages")
     pdf_database = _require_database(pdf_database, "index PDF")
@@ -514,9 +515,18 @@ def _connect_readonly(path):
 
 
 def _is_excluded_url(url):
-    """Retourne 1 si le segment terminal vaut `pricing` ou `token`, sinon 0."""
-    final_path_segment = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
-    return int(final_path_segment.lower() in {"pricing", "token"})
+    """Retourne 1 pour les routes exclues `pricing`, `contact` ou `token`."""
+    segments = [
+        segment.casefold()
+        for segment in urlsplit(url).path.split("/")
+        if segment
+    ]
+    excluded = bool(segments and segments[-1] in {"pricing", "token"})
+    excluded = excluded or any(
+        segments.count(tag) > 1
+        for tag in {"pricing", "contact", "token"}
+    )
+    return int(excluded)
 
 
 def _contextual_excerpt(text, total_length, match_position):

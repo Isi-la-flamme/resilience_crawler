@@ -326,7 +326,7 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(document["text"], expected_pdf_text)
         self.assertFalse(document["text_truncated"])
 
-    def test_pricing_and_token_urls_are_hidden_from_api(self):
+    def test_excluded_routes_are_hidden_from_api(self):
         pages = sqlite3.connect(self.pages_database)
         pages.executemany(
             """INSERT INTO pages
@@ -344,6 +344,12 @@ class PublicApiTests(unittest.TestCase):
                     "https://example.org/nested/token/",
                     "Token page",
                     "A token page.",
+                ),
+                (
+                    5,
+                    "https://example.org/contact/help/contact/form",
+                    "Repeated contact page",
+                    "A repeated contact page.",
                 ),
             ),
         )
@@ -363,6 +369,12 @@ class PublicApiTests(unittest.TestCase):
                 "https://example.org/nested/token",
                 "token.pdf",
                 "Token PDF",
+            ),
+            (
+                5,
+                "https://example.org/contact/help/contact/form",
+                "contact.pdf",
+                "Repeated contact PDF",
             ),
         ]
         documents.executemany(
@@ -387,8 +399,10 @@ class PublicApiTests(unittest.TestCase):
 
         pages_response = self.client.get("/api/v1/pages")
         hidden_page = self.client.get("/api/v1/pages/3")
+        repeated_contact_page = self.client.get("/api/v1/pages/5")
         documents_response = self.client.get("/api/v1/documents")
         hidden_document = self.client.get("/api/v1/documents/3")
+        repeated_contact_document = self.client.get("/api/v1/documents/5")
         sites = self.client.get("/api/v1/sites").json()["items"][0]
 
         self.assertEqual(pages_response.json()["total"], 2)
@@ -397,12 +411,14 @@ class PublicApiTests(unittest.TestCase):
             for item in pages_response.json()["items"]
         ))
         self.assertEqual(hidden_page.status_code, 404)
+        self.assertEqual(repeated_contact_page.status_code, 404)
         self.assertEqual(documents_response.json()["total"], 2)
         self.assertTrue(all(
             not item["source_url"].rstrip("/").endswith(("pricing", "token"))
             for item in documents_response.json()["items"]
         ))
         self.assertEqual(hidden_document.status_code, 404)
+        self.assertEqual(repeated_contact_document.status_code, 404)
         self.assertEqual(sites["pages"], 2)
         self.assertEqual(sites["documents"], 2)
 
