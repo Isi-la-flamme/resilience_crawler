@@ -1,0 +1,436 @@
+# Yennenga Crawl — prototype Open Data
+
+Yennenga Crawl est un prototype local qui collecte des pages et des documents
+depuis les sites configurés, prépare leur contenu pour la recherche, puis
+propose une API en lecture seule et une interface web de consultation.
+
+Ce projet est un outil de collecte et d’exploration. **Ce n’est pas un catalogue
+Open Data officiel et il ne détermine pas si les contenus peuvent être
+réutilisés.** Le statut des droits est actuellement `not_assessed` (« non
+évalué »).
+
+## Sommaire
+
+- [Fonctionnalités](#fonctionnalités)
+- [Chaîne de traitement](#chaîne-de-traitement)
+- [Prérequis et installation](#prérequis-et-installation)
+- [Démarrage rapide](#démarrage-rapide)
+- [Configuration du crawler](#configuration-du-crawler)
+- [Commandes](#commandes)
+- [API et tableau de bord](#api-et-tableau-de-bord)
+- [Fichiers produits](#fichiers-produits)
+- [Tests](#tests)
+- [Droits, provenance et précautions](#droits-provenance-et-précautions)
+- [Structure du projet](#structure-du-projet)
+- [Dépannage](#dépannage)
+
+## Fonctionnalités
+
+- Crawl multi-sites à partir d’URL de départ définies dans `config.json`.
+- File d’URL persistante dans SQLite, collecte reprenable après interruption.
+- Réglage des pages maximales, workers et retries par configuration ou par
+  lancement.
+- Actualisation des pages déjà collectées avec `--refresh` et validateurs HTTP
+  conditionnels lorsque le serveur les fournit.
+- Téléchargement des images et documents dans des dossiers distincts.
+- Export Excel des pages, images et documents.
+- Nettoyage du HTML en texte brut, avec exclusion des éléments non éditoriaux
+  et détection de blocs répétitifs par site.
+- Extraction et recherche plein texte des PDF, avec SQLite FTS5.
+- API FastAPI en lecture seule et tableau de bord web local.
+
+## Chaîne de traitement
+
+Le flux habituel est le suivant :
+
+```text
+sites institutionnels
+        │
+        ▼
+   cli.py / crawler
+        ├── crawl.db       pages, file d’URL, images et documents
+        ├── img/           images téléchargées
+        └── documents/     documents téléchargés
+              │
+              ├── cleaner.py ──────► crawl-clean.db
+              ├── pdf_index.py ────► pdf-index.db
+              └── cli.py --export-excel ─► crawl-export.xlsx
+                                         
+crawl-clean.db + pdf-index.db
+              │
+              ▼
+        api.py ──► tableau de bord et API locale
+```
+
+Le cleaner et l’indexeur lisent la base de collecte sans la modifier et créent
+des bases de sortie distinctes. L’API consulte les bases préparées ; elle ne
+sert ni les bases SQLite elles-mêmes ni les fichiers locaux des documents.
+
+## Prérequis et installation
+
+- Windows avec PowerShell (les commandes ci-dessous utilisent les chemins
+  habituels du dépôt).
+- Python **3.10 ou plus récent**.
+- Accès réseau aux sites configurés pour effectuer un crawl.
+
+Depuis la racine du dépôt, créer un environnement virtuel et installer les
+dépendances :
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Pour exécuter les tests, installer également les dépendances de développement :
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
+Les dépendances principales sont `openpyxl` (export Excel), `pypdf`
+(traitement des PDF), `fastapi` et `uvicorn` (API et serveur local).
+
+## Démarrage rapide
+
+Les commandes suivantes sont à exécuter depuis la racine du projet.
+
+1. **Lancer ou reprendre la collecte** :
+
+   ```powershell
+   .\.venv\Scripts\python.exe cli.py
+   ```
+
+   La configuration par défaut est `config.json`. Le crawler crée ou réutilise
+   `crawl.db`, `img/`, `documents/` et `crawler.log.jsonl`.
+
+2. **Préparer le texte des pages** :
+
+   ```powershell
+   .\.venv\Scripts\python.exe cleaner.py
+   ```
+
+   Par défaut, la commande lit `crawl.db` et crée `crawl-clean.db`.
+
+3. **Créer l’index plein texte des PDF** :
+
+   ```powershell
+   .\.venv\Scripts\python.exe pdf_index.py index
+   ```
+
+   Par défaut, la commande lit les documents référencés dans `crawl.db`, extrait
+   le texte des PDF téléchargés et crée `pdf-index.db`.
+
+4. **Démarrer le portail local** :
+
+   ```powershell
+   .\.venv\Scripts\python.exe api.py
+   ```
+
+   Ouvrir <http://127.0.0.1:8000/> pour le tableau de bord ou
+   <http://127.0.0.1:8000/docs> pour la documentation interactive de l’API.
+
+Les étapes de nettoyage et d’indexation sont indépendantes l’une de l’autre.
+Pour que le tableau de bord soit pleinement alimenté, exécuter chacune d’elles
+après la collecte.
+
+## Configuration du crawler
+
+`config.json` définit les URL initiales, les limites et les chemins de sortie.
+Les chemins relatifs sont résolus par rapport au dossier contenant le fichier
+de configuration.
+
+| Clé | Valeur actuelle | Description |
+| --- | --- | --- |
+| `start_urls` | Sites institutionnels dans `config.json` | URL de départ de chaque crawl. |
+| `max_pages` | `1000` | Nombre maximal de pages traitées par site. |
+| `workers` | `2` | Nombre de workers de collecte. |
+| `delay` | `0.5` | Délai configuré par le crawler entre les requêtes. |
+| `image_batch_size` | `1` | Taille des lots de téléchargement des images. |
+| `timeout` | `30` | Délai d’attente réseau, en secondes. |
+| `retries` | `2` | Nombre de reprises après la tentative initiale. |
+| `max_response_bytes` | `52428800` | Taille maximale d’une réponse, en octets (50 Mio). |
+| `database_file` | `crawl.db` | Base SQLite de collecte. |
+| `database_flush_interval` | `30` | Intervalle de sauvegarde de la base, en secondes. |
+| `images_dir` | `img` | Dossier des images téléchargées. |
+| `documents_dir` | `documents` | Dossier des documents téléchargés. |
+| `log_file` | `crawler.log.jsonl` | Fichier de journalisation. |
+| `crawler_name` | `Yennenga Crawl` | Nom attribué au crawler. |
+| `log_level` | `INFO` | Niveau de journalisation. |
+
+Les valeurs CLI `--max-pages`, `--workers` et `--retries` remplacent la
+configuration uniquement pour le lancement courant. `--retries 0` désactive
+les reprises après la tentative initiale. Vérifier les règles d’accès des sites
+et choisir une cadence raisonnable avant toute collecte.
+
+## Commandes
+
+### Collecter les sites configurés
+
+```powershell
+.\.venv\Scripts\python.exe cli.py
+```
+
+Utiliser une autre configuration ou modifier les paramètres pour ce lancement
+seulement :
+
+```powershell
+.\.venv\Scripts\python.exe cli.py --config .\config.json --max-pages 200 --workers 4 --retries 1
+```
+
+Actualiser les pages déjà enregistrées lorsque le serveur fournit des
+validateurs HTTP :
+
+```powershell
+.\.venv\Scripts\python.exe cli.py --refresh
+```
+
+La base conserve la file d’URL. En cas d’interruption avec `Ctrl+C`, le crawler
+arrête la planification, sauvegarde les données terminées et laisse les URLs
+restantes disponibles pour une reprise ultérieure.
+
+### Exporter la collecte vers Excel
+
+```powershell
+.\.venv\Scripts\python.exe cli.py --export-excel crawl-export.xlsx
+```
+
+Cette option exporte la base configurée sans lancer de crawl. Un chemin de
+sortie relatif est résolu à partir du dossier de la base SQLite. Le classeur
+contient trois feuilles : `Pages`, `Images` et `Documents`. Le texte dépassant
+la limite d’une cellule Excel est tronqué et signalé dans la colonne
+`Contenu tronqué`.
+
+### Nettoyer les pages
+
+```powershell
+.\.venv\Scripts\python.exe cleaner.py
+```
+
+Choisir explicitement les bases source et sortie :
+
+```powershell
+.\.venv\Scripts\python.exe cleaner.py --source-db .\crawl.db --output-db .\crawl-clean.db
+```
+
+Le nettoyage retire notamment les éléments `head`, scripts, styles, navigation,
+en-têtes, pieds de page, formulaires et autres éléments non éditoriaux. Il
+cherche aussi des blocs répétés sur au moins 80 % des pages d’un site (avec un
+minimum de trois pages). Le contenu destiné à la recherche est disponible dans
+la colonne `cleaned_text` de la base créée. Les blocs détectés et les
+statistiques par site sont conservés dans des tables dédiées.
+
+Par sécurité, la sortie doit être différente de la source et ne doit pas déjà
+exister. Pour regénérer la base nettoyée, choisir un nouveau nom de sortie ou
+déplacer manuellement l’ancienne base après avoir vérifié le chemin.
+
+### Indexer et rechercher les PDF
+
+Créer un index (la base de sortie ne doit pas déjà exister) :
+
+```powershell
+.\.venv\Scripts\python.exe pdf_index.py index
+```
+
+Personnaliser les chemins :
+
+```powershell
+.\.venv\Scripts\python.exe pdf_index.py index --source-db .\crawl.db --index-db .\pdf-index.db
+```
+
+Rechercher une expression :
+
+```powershell
+.\.venv\Scripts\python.exe pdf_index.py search "recrutement concours"
+```
+
+Les mots de la recherche sont combinés avec `AND` : les résultats doivent
+correspondre à tous les mots recherchés. Modifier la base utilisée ou le nombre
+maximal de résultats :
+
+```powershell
+.\.venv\Scripts\python.exe pdf_index.py search "budget national" --index-db .\pdf-index.db --limit 10
+```
+
+Les documents sont marqués `indexed` s’ils ont été traités, `no_text` si aucun
+texte n’a pu être extrait, ou `error` si une erreur de lecture est survenue.
+Les PDF numérisés comme images peuvent nécessiter une étape OCR séparée ; l’OCR
+n’est pas fourni par ce prototype.
+
+### Démarrer l’API
+
+```powershell
+.\.venv\Scripts\python.exe api.py
+```
+
+Voir [API.md](./API.md) pour le guide API. Les paramètres suivants peuvent être
+définis dans PowerShell avant le démarrage :
+
+```powershell
+$env:OPENDATA_PAGES_DB = "C:\data\crawl-clean.db"
+$env:OPENDATA_PDF_DB = "C:\data\pdf-index.db"
+$env:OPENDATA_HOST = "127.0.0.1"
+$env:OPENDATA_PORT = "8000"
+.\.venv\Scripts\python.exe api.py
+```
+
+Si les variables de base ne sont pas définies, l’API utilise `crawl-clean.db`
+et `pdf-index.db` dans le dossier du projet. Pour supprimer les variables de la
+session PowerShell :
+
+```powershell
+Remove-Item Env:OPENDATA_PAGES_DB, Env:OPENDATA_PDF_DB, Env:OPENDATA_HOST, Env:OPENDATA_PORT -ErrorAction SilentlyContinue
+```
+
+## API et tableau de bord
+
+Le service est configuré pour écouter sur `127.0.0.1:8000` par défaut.
+
+| Méthode | Route | Description |
+| --- | --- | --- |
+| `GET` | `/` | Tableau de bord de recherche. |
+| `GET` | `/api/v1/health` | État du service et disponibilité des bases. |
+| `GET` | `/api/v1/sites` | Sites disponibles dans les bases préparées. |
+| `GET` | `/api/v1/pages` | Liste et recherche des pages. |
+| `GET` | `/api/v1/pages/{id}` | Détail d’une page. |
+| `GET` | `/api/v1/documents` | Liste et recherche des PDF indexés. |
+| `GET` | `/api/v1/documents/{id}` | Détail d’un PDF indexé. |
+| `GET` | `/docs` | Documentation OpenAPI interactive de FastAPI. |
+
+Exemples de requêtes :
+
+```text
+http://127.0.0.1:8000/api/v1/health
+http://127.0.0.1:8000/api/v1/sites
+http://127.0.0.1:8000/api/v1/pages?q=budget&limit=20&offset=0
+http://127.0.0.1:8000/api/v1/pages?q=budget&site=primature.gov.bf
+http://127.0.0.1:8000/api/v1/documents?q=recrutement&limit=10
+```
+
+Les paramètres `q` et `site` filtrent les pages et les documents. Dans les
+recherches textuelles, les termes sont combinés avec `AND`. Les listes sont
+limitées par défaut à 20 éléments, avec un maximum de 100 par requête ; `offset`
+permet de parcourir les pages suivantes. Le texte des fiches détaillées est
+plafonné à 100 000 caractères. Les liens des PDF renvoient vers les URL des
+sources institutionnelles ; l’API ne télécharge ni ne sert directement les
+fichiers PDF.
+
+Une base préparée manquante peut conduire à un état dégradé ou à une réponse
+`503`. Une fiche qui n’existe pas renvoie `404` ; des paramètres invalides
+renvoient `422`.
+
+## Fichiers produits
+
+| Chemin par défaut | Rôle |
+| --- | --- |
+| `crawl.db` | Base source : file d’URL, pages collectées, images et documents. |
+| `crawl.db-wal`, `crawl.db-shm` | Fichiers SQLite temporaires possibles pendant l’utilisation de la base. |
+| `img/` | Images téléchargées pendant le crawl. |
+| `documents/` | Documents téléchargés pendant le crawl. |
+| `crawler.log.jsonl` | Journaux du crawler au format JSON Lines. |
+| `crawl-clean.db` | Texte des pages préparé et rapports de nettoyage. |
+| `pdf-index.db` | Métadonnées, texte extrait et index de recherche plein texte PDF. |
+| `crawl-export.xlsx` | Classeur optionnel, créé avec `--export-excel`. |
+
+Les bases, leurs éventuels fichiers WAL/SHM, les médias téléchargés et les
+exports sont des données générées ; ils ne sont pas destinés à être ajoutés au
+dépôt. Ne pas supprimer les fichiers `-wal` ou `-shm` pendant qu’un processus
+utilise la base SQLite correspondante.
+
+## Tests
+
+Depuis la racine du dépôt, après installation de `requirements-dev.txt` :
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Pour ne lancer que les tests de l’API :
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_public_api.py -q
+```
+
+Les tests utilisent des données temporaires et ne nécessitent pas de lancer le
+serveur web. Un avertissement pytest peut signaler que `TestHandler` dans les
+tests du crawler n’est pas une classe de test ; cet avertissement ne signifie
+pas à lui seul qu’un test a échoué.
+
+## Droits, provenance et précautions
+
+- La présence d’un contenu sur un site institutionnel ne suffit pas à prouver
+  qu’il est librement réutilisable.
+- Le projet ne déduit ni licence, ni domaine public, ni autorisation de
+  republication. Le statut est explicitement `not_assessed`.
+- Les URL d’origine et certaines informations de site sont conservées afin de
+  rendre la provenance vérifiable.
+- Avant toute publication ou réutilisation, vérifier les licences, mentions
+  légales, conditions d’utilisation, droits sur les textes, images et PDF,
+  ainsi que les éventuelles données personnelles. Demander une autorisation
+  lorsqu’elle est nécessaire.
+- Respecter les règles d’accès des sites, leurs limites de débit et toute
+  demande de retrait ou restriction applicable.
+- L’API est un prototype de consultation, sans authentification ni préparation
+  complète à une exposition publique. **Ne pas la rendre accessible depuis
+  Internet en l’état.** Un déploiement public nécessite notamment une revue de
+  sécurité et juridique, des contrôles d’accès adaptés, de la limitation de
+  débit, de la surveillance et une décision explicite sur les données
+  publiables.
+
+## Structure du projet
+
+```text
+.
+├── api.py                  # Application FastAPI et tableau de bord
+├── API.md                  # Documentation de l’API
+├── cli.py                  # Entrée CLI du crawler et export Excel
+├── cleaner.py              # CLI de nettoyage des pages
+├── config.json             # Sites et paramètres de crawl
+├── crawler/
+│   ├── cleaner.py          # Nettoyage HTML et génération de la base texte
+│   ├── database.py         # Stockage et file d’URL SQLite
+│   ├── engine.py           # Coordination du crawl
+│   ├── excel_export.py     # Export Excel
+│   ├── fetcher.py          # Requêtes HTTP
+│   ├── file_store.py       # Téléchargement et stockage des fichiers
+│   ├── parser.py           # Extraction des données des pages
+│   ├── pdf_index.py        # Extraction et recherche de PDF
+│   └── public_api.py       # Requêtes en lecture seule pour l’API
+├── pdf_index.py            # CLI d’indexation et de recherche PDF
+├── requirements.txt        # Dépendances d’exécution
+├── requirements-dev.txt    # Dépendances de test
+└── tests/                  # Tests automatisés
+```
+
+## Dépannage
+
+### Le tableau de bord indique que les données sont indisponibles
+
+Vérifier que `crawl-clean.db` et `pdf-index.db` existent. Si nécessaire,
+exécuter les commandes de nettoyage et d’indexation depuis une base `crawl.db`
+déjà alimentée. Vérifier également les valeurs de `OPENDATA_PAGES_DB` et
+`OPENDATA_PDF_DB` dans la session PowerShell courante.
+
+### Le cleaner ou l’indexeur indique que la sortie existe déjà
+
+Ces commandes refusent de remplacer une base existante. Choisir un autre nom
+de sortie ou déplacer l’ancienne base après avoir vérifié qu’elle n’est pas
+utilisée. Ne jamais utiliser le même chemin pour la base source et la sortie.
+
+### Un PDF apparaît avec le statut `no_text`
+
+Le PDF peut être vide, contenir uniquement des pages numérisées, ou ne pas
+exposer de texte extractible. L’indexeur courant n’effectue pas d’OCR.
+
+### Le crawler est interrompu ou le réseau échoue
+
+Consulter `crawler.log.jsonl` et relancer le crawler avec la même configuration
+pour reprendre les URLs restantes. Ajuster ponctuellement `--workers`,
+`--retries` ou `--max-pages` si cela est approprié au site et à l’objectif de
+collecte.
+
+### Une base SQLite semble accompagnée de fichiers `-wal` ou `-shm`
+
+Ces fichiers peuvent être normaux pendant l’activité SQLite en mode WAL.
+Laisser le processus terminer et fermer proprement la base avant tout
+déplacement ou archivage.

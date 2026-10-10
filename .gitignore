@@ -6,6 +6,16 @@ __pycache__/
 crawl.db
 crawl.db-shm
 crawl.db-wal
+crawl-clean.db
+crawl-clean.db-shm
+crawl-clean.db-wal
+crawl-clean-html.db
+crawl-clean-text.db
+crawl-clean-text.db-shm
+crawl-clean-text.db-wal
+pdf-index.db
+pdf-index.db-shm
+pdf-index.db-wal
 crawl-export.xlsx
 crawl-results.jsonl
 crawler.log.jsonl
