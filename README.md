@@ -26,12 +26,14 @@ réutilisés.** Le statut des droits est actuellement `not_assessed` (« non
 
 ## Fonctionnalités
 
-- Crawl multi-sites à partir d’URL de départ définies dans `config.json`.
+- Crawl multi-sites à partir d’URL de départ définies dans `config.yaml`.
 - File d’URL persistante dans SQLite, collecte reprenable après interruption.
 - Réglage des pages maximales, workers et retries par configuration ou par
   lancement.
 - Actualisation des pages déjà collectées avec `--refresh` et validateurs HTTP
   conditionnels lorsque le serveur les fournit.
+- Exclusion des URL dont le dernier segment du chemin est `pricing` ou `token`,
+  à la découverte par le crawler et dans les résultats de l’API.
 - Téléchargement des images et documents dans des dossiers distincts.
 - Export Excel des pages, images et documents.
 - Nettoyage du HTML en texte brut, avec exclusion des éléments non éditoriaux
@@ -89,7 +91,8 @@ Pour exécuter les tests, installer également les dépendances de développemen
 ```
 
 Les dépendances principales sont `openpyxl` (export Excel), `pypdf`
-(traitement des PDF), `fastapi` et `uvicorn` (API et serveur local).
+(traitement des PDF), `PyYAML` (configuration YAML), `fastapi` et `uvicorn`
+(API et serveur local).
 
 ## Démarrage rapide
 
@@ -98,11 +101,12 @@ Les commandes suivantes sont à exécuter depuis la racine du projet.
 1. **Lancer ou reprendre la collecte** :
 
    ```powershell
-   .\.venv\Scripts\python.exe cli.py
+   .\.venv\Scripts\python.exe cli.py --config config.yaml
    ```
 
-   La configuration par défaut est `config.json`. Le crawler crée ou réutilise
-   `crawl.db`, `img/`, `documents/` et `crawler.log.jsonl`.
+   Le crawler crée ou réutilise `crawl.db`, `img/`, `documents/` et
+   `crawler.log.jsonl`. Sans `--config`, la commande ne démarre pas de nouveaux
+   sites : elle ne reprend que les sites ayant une file en attente dans SQLite.
 
 2. **Préparer le texte des pages** :
 
@@ -136,13 +140,15 @@ après la collecte.
 
 ## Configuration du crawler
 
-`config.json` définit les URL initiales, les limites et les chemins de sortie.
+`config.yaml` définit les URL initiales, les limites et les chemins de sortie.
+Les fichiers `.json` restent lisibles si un chemin JSON est explicitement
+fourni à `--config` ; le fichier par défaut est désormais YAML.
 Les chemins relatifs sont résolus par rapport au dossier contenant le fichier
 de configuration.
 
 | Clé | Valeur actuelle | Description |
 | --- | --- | --- |
-| `start_urls` | Sites institutionnels dans `config.json` | URL de départ de chaque crawl. |
+| `start_urls` | Sites institutionnels dans `config.yaml` | URL de départ de chaque crawl. |
 | `max_pages` | `1000` | Nombre maximal de pages traitées par site. |
 | `workers` | `2` | Nombre de workers de collecte. |
 | `delay` | `0.5` | Délai configuré par le crawler entre les requêtes. |
@@ -158,24 +164,69 @@ de configuration.
 | `crawler_name` | `Yennenga Crawl` | Nom attribué au crawler. |
 | `log_level` | `INFO` | Niveau de journalisation. |
 
+Les documents (PDF et autres formats reconnus) sont plafonnés à **20 Mio**
+(20 × 1024 × 1024 octets), sans dépasser `max_response_bytes`. Si la taille
+annoncée ou reçue dépasse cette limite, le document est ignoré sans retry et
+son URL passe au statut `skipped` dans la file SQLite ; il ne sera donc pas
+repris automatiquement au prochain crawl. Cette règle ne change pas la limite
+appliquée aux pages HTML et aux autres réponses.
+
 Les valeurs CLI `--max-pages`, `--workers` et `--retries` remplacent la
 configuration uniquement pour le lancement courant. `--retries 0` désactive
 les reprises après la tentative initiale. Vérifier les règles d’accès des sites
 et choisir une cadence raisonnable avant toute collecte.
+
+Une URL qui échoue après les retries configurés garde le statut `failed` et
+n’est pas remise en attente automatiquement au prochain lancement. Pour
+retenter explicitement toutes les URL en échec :
+
+```powershell
+.\.venv\Scripts\python.exe cli.py --retry-failed
+```
+
+Les URL interrompues alors qu’elles étaient en cours de téléchargement sont
+remises en file automatiquement au lancement suivant.
 
 ## Commandes
 
 ### Collecter les sites configurés
 
 ```powershell
-.\.venv\Scripts\python.exe cli.py
+.\.venv\Scripts\python.exe cli.py --config config.yaml
 ```
+
+Sans option `--config`, `cli.py` ne démarre pas un nouveau crawl : il reprend
+uniquement les sites qui ont des URL en attente dans la base SQLite. Si aucun
+site n’est en attente, la commande affiche le rappel ci-dessus.
+
+Avec `--config`, le crawler ne sélectionne que les sites déclarés dans le YAML.
+Il reprend leurs URL en attente dans SQLite. Pour chaque URL de départ sans
+travail en attente, il initialise la file depuis les liens déjà enregistrés ;
+si aucune page du site n’existe encore, il démarre depuis le `start_url`. Les
+files en attente de sites absents du YAML ne sont pas traitées par ce lancement.
+Les URL déjà terminées ou en échec ne sont pas réactivées.
+
+Si la file d’un site a été supprimée mais que ses pages restent en base,
+l’initialisation reconstruit la file depuis les liens sauvegardés de ces pages.
+Les pages déjà enregistrées restent exclues du téléchargement ; le crawler
+continue avec leurs liens encore inconnus.
+
+Fournir une ou plusieurs URL de départ pour ce lancement seulement :
+
+```powershell
+.\.venv\Scripts\python.exe cli.py https://primature.gov.bf/
+.\.venv\Scripts\python.exe cli.py https://primature.gov.bf/ https://gouvernement.gov.bf/
+```
+
+Les URL fournies remplacent les `start_urls` de la configuration pour cette
+exécution. Le crawler reprend les files existantes pour ces sites ; si aucune
+URL n’y est en attente, il ajoute les URL données comme points de départ.
 
 Utiliser une autre configuration ou modifier les paramètres pour ce lancement
 seulement :
 
 ```powershell
-.\.venv\Scripts\python.exe cli.py --config .\config.json --max-pages 200 --workers 4 --retries 1
+.\.venv\Scripts\python.exe cli.py --config .\config.yaml --max-pages 200 --workers 4 --retries 1
 ```
 
 Actualiser les pages déjà enregistrées lorsque le serveur fournit des
@@ -186,8 +237,11 @@ validateurs HTTP :
 ```
 
 La base conserve la file d’URL. En cas d’interruption avec `Ctrl+C`, le crawler
-arrête la planification, sauvegarde les données terminées et laisse les URLs
-restantes disponibles pour une reprise ultérieure.
+arrête la planification, sauvegarde les données terminées et laisse les URL
+restantes disponibles pour une reprise ultérieure. Les URL déjà enregistrées
+comme pages ou documents ne sont pas réclamées une seconde fois. Avec
+`--refresh`, les sites sont ceux fournis en argument ou, à défaut, ceux de la
+configuration.
 
 ### Exporter la collecte vers Excel
 
@@ -216,9 +270,13 @@ Choisir explicitement les bases source et sortie :
 Le nettoyage retire notamment les éléments `head`, scripts, styles, navigation,
 en-têtes, pieds de page, formulaires et autres éléments non éditoriaux. Il
 cherche aussi des blocs répétés sur au moins 80 % des pages d’un site (avec un
-minimum de trois pages). Le contenu destiné à la recherche est disponible dans
-la colonne `cleaned_text` de la base créée. Les blocs détectés et les
-statistiques par site sont conservés dans des tables dédiées.
+minimum de trois pages). Après nettoyage, les pages dont le texte exploitable
+fait **moins de 500 caractères** sont exclues de la base nettoyée ; une page de
+500 caractères exactement est conservée. La base source de collecte n’est pas
+modifiée. Le texte destiné à la recherche est disponible dans la colonne
+`cleaned_text` de la base créée. Les blocs détectés et les statistiques par
+site sont conservés dans des tables dédiées ; `source_pages` compte les pages
+de la base d’origine et `cleaned_pages` les pages conservées après le filtre.
 
 Par sécurité, la sortie doit être différente de la source et ne doit pas déjà
 exister. Pour regénérer la base nettoyée, choisir un nouveau nom de sortie ou
@@ -315,6 +373,20 @@ plafonné à 100 000 caractères. Les liens des PDF renvoient vers les URL des
 sources institutionnelles ; l’API ne télécharge ni ne sert directement les
 fichiers PDF.
 
+Les réponses des routes de liste exposent les champs utilisés dans
+`search_fields` (`title` et `text` pour les pages ; `title`, `author`, `site`
+et `text` pour les PDF) ainsi que les termes analysés dans `matched_terms`.
+Chaque résultat comprend son titre, son URL de source et un extrait de texte.
+L’extrait d’une page est centré sur la première occurrence du premier terme
+recherché ; pour les PDF, l’extrait provient de l’index plein texte. Le tableau
+de bord met en évidence les termes recherchés dans les titres, les extraits et
+le texte intégral. Cliquer sur **Lire le texte intégral** récupère le texte
+complet depuis la base SQLite locale ; les routes de détail ne le tronquent
+pas. L’URL d’origine est affichée comme provenance, sans lien externe : ouvrir
+un résultat n’effectue aucune requête au site institutionnel. Les PDF
+eux-mêmes ne sont pas servis ; seul le texte extrait et enregistré dans
+l’index local est affiché.
+
 Une base préparée manquante peut conduire à un état dégradé ou à une réponse
 `503`. Une fiche qui n’existe pas renvoie `404` ; des paramètres invalides
 renvoient `422`.
@@ -385,7 +457,7 @@ pas à lui seul qu’un test a échoué.
 ├── API.md                  # Documentation de l’API
 ├── cli.py                  # Entrée CLI du crawler et export Excel
 ├── cleaner.py              # CLI de nettoyage des pages
-├── config.json             # Sites et paramètres de crawl
+├── config.yaml             # Sites et paramètres YAML du crawl
 ├── crawler/
 │   ├── cleaner.py          # Nettoyage HTML et génération de la base texte
 │   ├── database.py         # Stockage et file d’URL SQLite

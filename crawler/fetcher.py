@@ -3,13 +3,19 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from .constants import USER_AGENT
+from .document_downloader import document_extension
 from .metrics import metrics
 
 logger = logging.getLogger(__name__)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 
 
 class ResponseTooLargeError(ValueError):
+    pass
+
+
+class DocumentTooLargeError(ResponseTooLargeError):
     pass
 
 
@@ -30,27 +36,43 @@ class Fetcher:
                 request = Request(url, headers=request_headers)
                 try:
                     with urlopen(request, timeout=self.timeout) as response:
+                        content_type = response.headers.get_content_type()
+                        is_document = document_extension(url, content_type) is not None
+                        response_limit = (
+                            min(self.max_response_bytes, MAX_DOCUMENT_BYTES)
+                            if is_document
+                            else self.max_response_bytes
+                        )
                         content_length = response.headers.get("Content-Length")
-                        if content_length is not None and int(content_length) > self.max_response_bytes:
+                        if content_length is not None and int(content_length) > response_limit:
+                            if is_document:
+                                raise DocumentTooLargeError(
+                                    f"Document supérieur à la limite de "
+                                    f"{response_limit} octets."
+                                )
                             raise ResponseTooLargeError(
                                 f"Réponse supérieure à la limite de "
-                                f"{self.max_response_bytes} octets."
+                                f"{response_limit} octets."
                             )
 
-                        content_type = response.headers.get_content_type()
                         charset = response.headers.get_content_charset() or "utf-8"
 
                         body = bytearray()
                         while True:
-                            remaining = self.max_response_bytes + 1 - len(body)
+                            remaining = response_limit + 1 - len(body)
                             chunk = response.read(min(65536, remaining))
                             if not chunk:
                                 break
                             body.extend(chunk)
-                            if len(body) > self.max_response_bytes:
+                            if len(body) > response_limit:
+                                if is_document:
+                                    raise DocumentTooLargeError(
+                                        f"Document supérieur à la limite de "
+                                        f"{response_limit} octets."
+                                    )
                                 raise ResponseTooLargeError(
                                     f"Réponse supérieure à la limite de "
-                                    f"{self.max_response_bytes} octets."
+                                    f"{response_limit} octets."
                                 )
 
                         logger.info("FETCH OK %s (%d bytes, %s)", url, len(body), content_type)

@@ -18,6 +18,7 @@ MIN_REPEATED_PAGES = 3
 BLOCK_TEXT_MIN_LENGTH = 80
 BLOCK_TEXT_MAX_LENGTH = 10000
 BLOCK_SAMPLE_LENGTH = 300
+MIN_CLEANED_TEXT_LENGTH = 500
 PROCESS_BATCH_SIZE = 100
 EXCLUDED_TAGS = {
     "head", "script", "style", "noscript", "svg", "nav", "header",
@@ -237,30 +238,33 @@ def _clean_pages(source, target, repeated_blocks):
                 repeated_blocks.get(start_url, set())
             ).clean(source_html or "")
             cleaned_text = PageParser.parse_html(cleaned_body_html)[4]
-            target.execute(
-                """INSERT INTO pages
-                   (id, start_url, url, url_hash, title, published_at, content,
-                    cleaned_text, crawler_name, links_json, images_json, crawled_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    page_id,
-                    start_url,
-                    url,
-                    url_hash,
-                    title,
-                    published_at,
-                    content,
-                    cleaned_text,
-                    crawler_name,
-                    links_json,
-                    images_json,
-                    crawled_at,
-                ),
-            )
+            include_page = len(cleaned_text) >= MIN_CLEANED_TEXT_LENGTH
+            if include_page:
+                target.execute(
+                    """INSERT INTO pages
+                       (id, start_url, url, url_hash, title, published_at, content,
+                        cleaned_text, crawler_name, links_json, images_json, crawled_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        page_id,
+                        start_url,
+                        url,
+                        url_hash,
+                        title,
+                        published_at,
+                        content,
+                        cleaned_text,
+                        crawler_name,
+                        links_json,
+                        images_json,
+                        crawled_at,
+                    ),
+                )
             page_totals = report_totals.setdefault(start_url, [0, 0, 0, 0])
-            page_totals[0] += 1
+            page_totals[0] += include_page
             page_totals[1] += len((source_html or "").encode("utf-8"))
-            page_totals[2] += len(cleaned_text.encode("utf-8"))
+            if include_page:
+                page_totals[2] += len(cleaned_text.encode("utf-8"))
             page_totals[3] += removed_count
             processed += 1
             if processed % PROCESS_BATCH_SIZE == 0:

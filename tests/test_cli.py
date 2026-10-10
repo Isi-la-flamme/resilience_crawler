@@ -70,6 +70,7 @@ class CliTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 database = database_class.return_value.__enter__.return_value
+                database.queued_start_urls.return_value = []
                 database.summary.return_value = {
                     "pages": 0,
                     "images": 0,
@@ -94,6 +95,310 @@ class CliTests(unittest.TestCase):
             self.assertEqual(call.kwargs["workers"], 3)
             self.assertEqual(call.kwargs["retries"], 0)
             self.assertTrue(call.kwargs["refresh"])
+
+    def test_explicit_start_urls_are_used_instead_of_other_queued_sites(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(json.dumps({
+                "start_urls": ["https://configured.example/"],
+                "max_pages": 25,
+                "workers": 2,
+                "delay": 0,
+                "timeout": 5,
+                "retries": 1,
+                "max_response_bytes": 1024,
+                "database_file": "crawl.db",
+                "images_dir": "img",
+                "log_file": "crawler.jsonl",
+            }), encoding="utf-8")
+
+            with (
+                patch("cli.configure_logging", return_value=[]),
+                patch("cli.CrawlDatabase") as database_class,
+                patch("cli.Crawler") as crawler_class,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                database = database_class.return_value.__enter__.return_value
+                database.queued_start_urls.return_value = []
+                database.summary.return_value = {
+                    "pages": 0,
+                    "images": 0,
+                    "documents": 0,
+                }
+                crawler_class.crawl_many.return_value = [{"pages": []}]
+
+                cli.main([
+                    "--config", str(config_path),
+                    "https://argument.example/",
+                ])
+
+        self.assertEqual(
+            [call.args[0] for call in crawler_class.call_args_list],
+            ["https://argument.example/"],
+        )
+        self.assertEqual(output.getvalue().count("Crawl terminé"), 1)
+
+    def test_uses_configured_start_urls_when_no_positional_urls_are_given(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(json.dumps({
+                "start_urls": ["https://configured.example/"],
+                "max_pages": 25,
+                "workers": 2,
+                "delay": 0,
+                "timeout": 5,
+                "retries": 1,
+                "max_response_bytes": 1024,
+                "database_file": "crawl.db",
+                "images_dir": "img",
+                "log_file": "crawler.jsonl",
+            }), encoding="utf-8")
+
+            with (
+                patch("cli.configure_logging", return_value=[]),
+                patch("cli.CrawlDatabase") as database_class,
+                patch("cli.Crawler") as crawler_class,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                database = database_class.return_value.__enter__.return_value
+                database.queued_start_urls.return_value = []
+                database.summary.return_value = {
+                    "pages": 0,
+                    "images": 0,
+                    "documents": 0,
+                }
+                crawler_class.crawl_many.return_value = [{"pages": []}]
+
+                cli.main(["--config", str(config_path)])
+
+        crawler_class.assert_called_once()
+        self.assertEqual(
+            crawler_class.call_args.args[0],
+            "https://configured.example/",
+        )
+
+    def test_retry_failed_flag_explicitly_requeues_failures(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(json.dumps({
+                "start_urls": ["https://configured.example/"],
+                "max_pages": 25,
+                "workers": 2,
+                "delay": 0,
+                "timeout": 5,
+                "retries": 1,
+                "max_response_bytes": 1024,
+                "database_file": "crawl.db",
+                "images_dir": "img",
+                "log_file": "crawler.jsonl",
+            }), encoding="utf-8")
+
+            with (
+                patch("cli.configure_logging", return_value=[]),
+                patch("cli.CrawlDatabase") as database_class,
+                patch("cli.Crawler") as crawler_class,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                database = database_class.return_value.__enter__.return_value
+                database.retry_failed_urls.return_value = 2
+                database.queued_start_urls.return_value = []
+                database.summary.return_value = {
+                    "pages": 0,
+                    "images": 0,
+                    "documents": 0,
+                }
+                crawler_class.crawl_many.return_value = [{"pages": []}]
+
+                cli.main(["--config", str(config_path), "--retry-failed"])
+
+        database.retry_failed_urls.assert_called_once_with([
+            "https://configured.example/",
+        ])
+        crawler_class.assert_called_once()
+        self.assertEqual(
+            crawler_class.call_args.args[0],
+            "https://configured.example/",
+        )
+        self.assertIn("2 URL en échec remises", output.getvalue())
+
+    def test_no_config_resumes_pending_sites(self):
+        config = {
+            "start_urls": ["https://configured.example/"],
+            "max_pages": 25,
+            "workers": 2,
+            "delay": 0,
+            "timeout": 5,
+            "retries": 1,
+            "max_response_bytes": 1024,
+            "database_path": Path("crawl.db"),
+            "images_path": Path("img"),
+            "documents_path": Path("documents"),
+            "log_path": Path("crawler.jsonl"),
+            "crawler_name": "Test",
+            "database_flush_interval": 30,
+            "image_batch_size": 1,
+        }
+        with (
+            patch("cli.load_config", return_value=config),
+            patch("cli.configure_logging", return_value=[]),
+            patch("cli.CrawlDatabase") as database_class,
+            patch("cli.Crawler") as crawler_class,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            database = database_class.return_value.__enter__.return_value
+            database.queued_start_urls.return_value = ["https://pending.example/"]
+            database.summary.return_value = {
+                "pages": 0,
+                "images": 0,
+                "documents": 0,
+            }
+            crawler_class.crawl_many.return_value = [{"pages": []}]
+
+            cli.main([])
+
+        crawler_class.assert_called_once()
+        self.assertEqual(crawler_class.call_args.args[0], "https://pending.example/")
+        self.assertIn("Reprise de 1 site(s)", output.getvalue())
+
+    def test_no_config_and_empty_queue_requests_explicit_config(self):
+        config = {
+            "start_urls": ["https://configured.example/"],
+            "max_pages": 25,
+            "workers": 2,
+            "delay": 0,
+            "timeout": 5,
+            "retries": 1,
+            "max_response_bytes": 1024,
+            "database_path": Path("crawl.db"),
+            "images_path": Path("img"),
+            "documents_path": Path("documents"),
+            "log_path": Path("crawler.jsonl"),
+            "crawler_name": "Test",
+            "database_flush_interval": 30,
+            "image_batch_size": 1,
+        }
+        with (
+            patch("cli.load_config", return_value=config),
+            patch("cli.configure_logging", return_value=[]),
+            patch("cli.CrawlDatabase") as database_class,
+            patch("cli.Crawler") as crawler_class,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            database = database_class.return_value.__enter__.return_value
+            database.queued_start_urls.return_value = []
+
+            cli.main([])
+
+        crawler_class.assert_not_called()
+        self.assertIn("python cli.py --config config.yaml", output.getvalue())
+
+    def test_config_uses_only_pending_urls_for_configured_sites(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(json.dumps({
+                "start_urls": [
+                    "https://configured.example/",
+                    "https://another.example/",
+                ],
+                "max_pages": 25,
+                "workers": 2,
+                "delay": 0,
+                "timeout": 5,
+                "retries": 1,
+                "max_response_bytes": 1024,
+                "database_file": "crawl.db",
+                "images_dir": "img",
+                "log_file": "crawler.jsonl",
+            }), encoding="utf-8")
+
+            with (
+                patch("cli.configure_logging", return_value=[]),
+                patch("cli.CrawlDatabase") as database_class,
+                patch("cli.Crawler") as crawler_class,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                database = database_class.return_value.__enter__.return_value
+                database.queued_start_urls.side_effect = [
+                    ["https://another.example/"],
+                    ["https://another.example/", "https://configured.example/"],
+                ]
+                database.ensure_start_url_queued.return_value = 1
+                database.summary.return_value = {
+                    "pages": 0,
+                    "images": 0,
+                    "documents": 0,
+                }
+                crawler_class.crawl_many.return_value = [
+                    {"pages": []},
+                    {"pages": []},
+                ]
+
+                cli.main(["--config", str(config_path)])
+
+        self.assertEqual(
+            [call.args[0] for call in crawler_class.call_args_list],
+            [
+                "https://another.example/",
+                "https://configured.example/",
+            ],
+        )
+        self.assertEqual(
+            database.queued_start_urls.call_args_list[0].args,
+            (["https://configured.example/", "https://another.example/"],),
+        )
+        self.assertEqual(
+            database.ensure_start_url_queued.call_args_list[0].args,
+            ("https://configured.example/",),
+        )
+        self.assertEqual(
+            database.ensure_start_url_queued.call_args_list[1].args,
+            ("https://another.example/",),
+        )
+        self.assertIn("Priorité aux URL en attente", output.getvalue())
+
+    def test_config_starts_from_yaml_when_only_unconfigured_sites_are_queued(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(json.dumps({
+                "start_urls": ["https://configured.example/"],
+                "max_pages": 25,
+                "workers": 2,
+                "delay": 0,
+                "timeout": 5,
+                "retries": 1,
+                "max_response_bytes": 1024,
+                "database_file": "crawl.db",
+                "images_dir": "img",
+                "log_file": "crawler.jsonl",
+            }), encoding="utf-8")
+
+            with (
+                patch("cli.configure_logging", return_value=[]),
+                patch("cli.CrawlDatabase") as database_class,
+                patch("cli.Crawler") as crawler_class,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                database = database_class.return_value.__enter__.return_value
+                database.queued_start_urls.return_value = []
+                database.ensure_start_url_queued.return_value = 0
+                database.summary.return_value = {
+                    "pages": 0,
+                    "images": 0,
+                    "documents": 0,
+                }
+                crawler_class.crawl_many.return_value = [{"pages": []}]
+
+                cli.main(["--config", str(config_path)])
+
+        crawler_class.assert_called_once()
+        self.assertEqual(
+            crawler_class.call_args.args[0],
+            "https://configured.example/",
+        )
+        self.assertEqual(
+            database.queued_start_urls.call_args_list[0].args,
+            (["https://configured.example/"],),
+        )
 
     def test_rejects_invalid_runtime_limits(self):
         for option, value in (

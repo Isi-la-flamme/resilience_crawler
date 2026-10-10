@@ -20,6 +20,11 @@ Override those paths with `OPENDATA_PAGES_DB` and `OPENDATA_PDF_DB`.
 `OPENDATA_HOST` defaults to `127.0.0.1`; do not expose this prototype directly
 to the public internet.
 
+The pages database is prepared by `cleaner.py`; pages whose cleaned text is
+shorter than 500 characters are excluded there. The original crawl database is
+left unchanged. The API also hides pages and documents whose URL path ends
+with `pricing` or `token`, including those already present in older databases.
+
 ## Endpoints
 
 - `GET /api/v1/health`
@@ -29,8 +34,18 @@ to the public internet.
 - `GET /api/v1/documents?q=recrutement&site=www.defense.gov.bf`
 - `GET /api/v1/documents/{id}`
 
-Search terms are combined with AND. Page and document lists are paginated;
-full-text details are capped at 100,000 characters. PDF files themselves are
-not served: results link to the institution's original source.
+Search terms are combined with AND. Page searches cover `title` and `text`;
+document searches cover `title`, `author`, `site`, and extracted PDF `text`.
+List responses expose this scope as `search_fields`, the parsed terms as
+`matched_terms`, and the source title, URL, and a text excerpt for each result.
+Page excerpts are centered on the first query term when it occurs in the text;
+PDF excerpts come from the full-text index. The dashboard highlights query
+terms in titles, excerpts, and full text. Select **Lire le texte intégral** on
+a result to fetch its complete text from the local SQLite-backed API; the
+detail endpoints return all text stored in the database without truncation.
+No request is made to the institution's website when opening a result. The
+source URL is displayed as provenance, not as a link. PDF files themselves
+are not served; only extracted text stored in the local index is displayed.
+Page and document lists are paginated.
 
 Install `requirements-dev.txt` to run the tests that use FastAPI's test client.

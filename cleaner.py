@@ -12,7 +12,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
             "Extrait le texte exploitable des pages, retire le head et les blocs "
-            "répétés, puis crée une nouvelle base SQLite."
+            "répétés, exclut les textes de moins de 500 caractères et crée une "
+            "nouvelle base SQLite."
         )
     )
     parser.add_argument(

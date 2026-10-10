@@ -19,6 +19,7 @@ class TestHandler(BaseHTTPRequestHandler):
     excluded_route_requests = []
     missing_get_requests = 0
     missing_head_requests = 0
+    oversized_document_requests = 0
     head_requests = 0
     slow_active = 0
     slow_max_active = 0
@@ -51,6 +52,12 @@ class TestHandler(BaseHTTPRequestHandler):
             type(self).transient_requests += 1
             status = 503 if type(self).transient_requests == 1 else 200
             self.respond(status, "<title>Récupérée</title>")
+        elif self.path == "/oversized.pdf":
+            type(self).oversized_document_requests += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(20 * 1024 * 1024 + 1))
+            self.end_headers()
         elif self.path == "/large":
             self.respond(200, "<title>" + ("a" * 100) + "</title>")
         elif self.path == "/conditional":
@@ -414,6 +421,30 @@ class CrawlerTests(unittest.TestCase):
 
         self.assertFalse(result["pages"])
         self.assertIn("limite de 40 octets", result["errors"][0]["error"])
+
+    def test_skips_pdf_over_20_mib_without_retry_or_future_resume(self):
+        TestHandler.oversized_document_requests = 0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "crawl.db"
+            start_url = self.base_url + "/oversized.pdf"
+            with CrawlDatabase(database_path) as database:
+                result = self.make_crawler(
+                    "/oversized.pdf",
+                    database=database,
+                    retries=2,
+                ).crawl()
+                status = database._connection.execute(
+                    "SELECT status FROM url_queue WHERE start_url=? AND url=?",
+                    (start_url, start_url),
+                ).fetchone()[0]
+
+            with CrawlDatabase(database_path) as database:
+                resumed_url = database.claim_next(start_url)
+
+        self.assertEqual(TestHandler.oversized_document_requests, 1)
+        self.assertEqual(status, "skipped")
+        self.assertIsNone(resumed_url)
+        self.assertEqual(result["errors"], [])
 
     def test_cli_output_is_json_serializable(self):
         result = self.make_crawler(max_pages=1).crawl()

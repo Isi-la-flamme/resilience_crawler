@@ -19,8 +19,7 @@ from .metrics import metrics
 from .database import CrawlDatabase
 
 from .document_downloader import DocumentDownloader, document_extension
-
-from .fetcher import Fetcher
+from .fetcher import DocumentTooLargeError, Fetcher
 
 from .image_downloader import ImageDownloader
 
@@ -272,6 +271,10 @@ class Crawler:
                 page, discovered_urls, validators, not_modified = future.result()
             except HTTPError as error:
                 Crawler._handle_http_error(state, url, error)
+                continue
+            except DocumentTooLargeError as error:
+                crawler.database.set_url_status(crawler.start_url, url, "skipped")
+                logger.info("Skipping oversized document %s: %s", url, error)
                 continue
             except (URLError, TimeoutError, OSError, ValueError) as error:
                 crawler.database.set_url_status(crawler.start_url, url, "failed", str(error))

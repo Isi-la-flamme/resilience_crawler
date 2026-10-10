@@ -8,12 +8,42 @@ from contextlib import redirect_stderr
 from pathlib import Path
 
 from crawler.config import load_config
+from crawler.config import DEFAULT_CONFIG_PATH
 from crawler.database import CrawlDatabase
 from crawler.json_logging import JsonLineFormatter
 from crawler.logging_setup import configure_logging
 
 
 class DatabaseConfigTests(unittest.TestCase):
+    def test_default_configuration_path_is_yaml(self):
+        self.assertEqual(DEFAULT_CONFIG_PATH.name, "config.yaml")
+        self.assertTrue(DEFAULT_CONFIG_PATH.is_file())
+
+    def test_loads_yaml_configuration_and_resolves_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.yaml"
+            config_path.write_text(
+                "start_urls:\n"
+                "  - https://example.org/\n"
+                "max_pages: 12\n"
+                "workers: 2\n"
+                "delay: 0.5\n"
+                "timeout: 10\n"
+                "retries: 1\n"
+                "max_response_bytes: 2048\n"
+                "database_file: crawl.db\n"
+                "images_dir: img\n"
+                "documents_dir: documents\n"
+                "log_file: crawler.jsonl\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertEqual(config["start_urls"], ["https://example.org/"])
+        self.assertEqual(config["max_pages"], 12)
+        self.assertEqual(config["database_path"], config_path.parent / "crawl.db")
+
     def test_loads_workers_and_resolves_paths_relative_to_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.json"
@@ -74,7 +104,118 @@ class DatabaseConfigTests(unittest.TestCase):
 
             with CrawlDatabase(database_path) as database:
                 self.assertEqual(database.page_count(start_url), 1)
+                self.assertIsNone(database.claim_next(start_url))
+                self.assertEqual(database.retry_failed_urls([start_url]), 1)
                 self.assertEqual(database.claim_next(start_url), "https://example.org/next")
+
+    def test_failed_urls_are_not_automatically_requeued(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "crawl.db"
+            start_url = "https://example.org/"
+            failed_url = start_url + "unavailable"
+            with CrawlDatabase(database_path) as database:
+                database.enqueue(start_url, [failed_url])
+                self.assertEqual(database.claim_next(start_url), failed_url)
+                database.set_url_status(start_url, failed_url, "failed", "timeout")
+
+            with CrawlDatabase(database_path) as database:
+                self.assertIsNone(database.claim_next(start_url))
+                self.assertEqual(database.retry_failed_urls([start_url]), 1)
+                self.assertEqual(database.claim_next(start_url), failed_url)
+
+    def test_finds_pending_sites_with_optional_start_url_filter(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "crawl.db"
+            queued_start = "https://queued.example/"
+            other_start = "https://other.example/"
+            done_start = "https://done.example/"
+            with CrawlDatabase(database_path) as database:
+                database.enqueue(queued_start, [queued_start + "pending"])
+                database.enqueue(other_start, [other_start + "pending"])
+                database.enqueue(done_start, [done_start + "done"])
+                database.claim_next(done_start)
+                database.save_page(
+                    done_start,
+                    {
+                        "url": done_start + "done",
+                        "title": "Done",
+                        "links": [],
+                        "images": [],
+                    },
+                    [],
+                )
+
+                self.assertEqual(
+                    database.queued_start_urls(),
+                    [other_start, queued_start],
+                )
+                self.assertEqual(
+                    database.queued_start_urls([other_start, done_start]),
+                    [other_start],
+                )
+                self.assertEqual(database.queued_start_urls([]), [])
+
+    def test_reseeds_missing_queue_from_saved_page_links(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "crawl.db"
+            start_url = "https://example.org/"
+            saved_url = start_url + "already-crawled"
+            pending_url = start_url + "not-crawled-yet"
+            with CrawlDatabase(database_path) as database:
+                database.save_page(
+                    start_url,
+                    {
+                        "url": saved_url,
+                        "title": "Saved",
+                        "links": [saved_url, pending_url],
+                        "images": [],
+                    },
+                    [saved_url, pending_url],
+                )
+                database._connection.execute("DELETE FROM url_queue")
+
+                self.assertEqual(database.ensure_start_url_queued(start_url), 2)
+                self.assertEqual(database.ensure_start_url_queued(start_url), 0)
+                self.assertEqual(
+                    database.queued_start_urls(),
+                    [start_url],
+                )
+                self.assertEqual(database.claim_next(start_url), pending_url)
+
+    def test_reseeding_does_not_reactivate_failed_or_skipped_urls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            start_url = "https://example.org/"
+            failed_url = start_url + "failed"
+            skipped_url = start_url + "skipped"
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                database.save_page(
+                    start_url,
+                    {
+                        "url": start_url + "index",
+                        "title": "Index",
+                        "links": [failed_url, skipped_url],
+                        "images": [],
+                    },
+                    [failed_url, skipped_url],
+                )
+                database.set_url_status(start_url, failed_url, "failed", "network error")
+                database.set_url_status(start_url, skipped_url, "skipped", "too large")
+
+                self.assertEqual(database.ensure_start_url_queued(start_url), 0)
+                statuses = dict(database._connection.execute(
+                    "SELECT url, status FROM url_queue WHERE start_url=?",
+                    (start_url,),
+                ))
+
+        self.assertEqual(statuses[failed_url], "failed")
+        self.assertEqual(statuses[skipped_url], "skipped")
+
+    def test_seeds_new_start_url_when_queue_and_pages_are_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            start_url = "https://new.example/"
+            with CrawlDatabase(Path(temp_dir) / "crawl.db") as database:
+                self.assertEqual(database.ensure_start_url_queued(start_url), 1)
+                self.assertEqual(database.claim_next(start_url), start_url)
 
     def test_migrates_existing_pages_without_losing_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:

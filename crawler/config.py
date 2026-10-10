@@ -1,17 +1,25 @@
 import json
 from pathlib import Path
 
+import yaml
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
 
 def load_config(path=DEFAULT_CONFIG_PATH):
     config_path = Path(path)
     with config_path.open(encoding="utf-8") as config_file:
-        config = json.load(config_file)
+        if config_path.suffix.lower() == ".json":
+            config = json.load(config_file)
+        else:
+            try:
+                config = yaml.safe_load(config_file)
+            except yaml.YAMLError as error:
+                raise ValueError(f"Configuration YAML invalide : {error}") from error
 
     if not isinstance(config, dict):
-        raise ValueError("La configuration doit être un objet JSON.")
+        raise ValueError("La configuration doit être un objet YAML ou JSON.")
 
     start_urls = config.get("start_urls")
     if not isinstance(start_urls, list) or not start_urls:

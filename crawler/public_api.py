@@ -10,7 +10,8 @@ RIGHTS_NOTICE = (
     "Les conditions de réutilisation ne sont pas encore évaluées. "
     "Consultez la source institutionnelle."
 )
-MAX_DETAIL_TEXT = 100_000
+PDF_SNIPPET_START = "\ue000"
+PDF_SNIPPET_END = "\ue001"
 
 
 def list_sites(pages_database, pdf_database):
@@ -23,7 +24,9 @@ def list_sites(pages_database, pdf_database):
         for start_url, page_count, latest, body_bytes in pages_connection.execute("""
             SELECT start_url, COUNT(*), MAX(crawled_at),
                    SUM(length(cleaned_text))
-            FROM pages GROUP BY start_url ORDER BY start_url
+            FROM pages
+            WHERE is_excluded_url(url)=0
+            GROUP BY start_url ORDER BY start_url
         """):
             host = urlsplit(start_url).hostname or start_url
             sites[host] = {
@@ -37,7 +40,9 @@ def list_sites(pages_database, pdf_database):
                 "rights_notice": RIGHTS_NOTICE,
             }
         for host, document_count in pdf_connection.execute("""
-            SELECT site_name, COUNT(*) FROM documents GROUP BY site_name
+            SELECT site_name, COUNT(*) FROM documents
+            WHERE is_excluded_url(url)=0
+            GROUP BY site_name
         """):
             site = sites.setdefault(host, {
                 "name": host,
@@ -61,6 +66,7 @@ def list_pages(database, query=None, site=None, limit=20, offset=0):
     terms = _terms(query)
     filters = []
     parameters = []
+    filters.append("is_excluded_url(url)=0")
     if site:
         filters.append("start_url = ?")
         parameters.append(_site_start_url(site))
@@ -69,6 +75,28 @@ def list_pages(database, query=None, site=None, limit=20, offset=0):
         escaped = _escape_like(term)
         parameters.extend((f"%{escaped}%", f"%{escaped}%"))
     where = f" WHERE {' AND '.join(filters)}" if filters else ""
+    if terms:
+        start_cases = " ".join(
+            "WHEN instr(lower(cleaned_text), lower(?)) > 0 "
+            "THEN max(1, instr(lower(cleaned_text), lower(?)) - 350)"
+            for _ in terms
+        )
+        position_cases = " ".join(
+            "WHEN instr(lower(cleaned_text), lower(?)) > 0 "
+            "THEN instr(lower(cleaned_text), lower(?))"
+            for _ in terms
+        )
+        excerpt_start = f"CASE {start_cases} ELSE 1 END"
+        match_position = f"CASE {position_cases} ELSE 0 END"
+        excerpt_parameters = [
+            value
+            for term in terms
+            for value in (term, term)
+        ] * 2
+    else:
+        excerpt_start = "1"
+        match_position = "0"
+        excerpt_parameters = []
     connection = _connect_readonly(database)
     try:
         total = connection.execute(
@@ -77,11 +105,18 @@ def list_pages(database, query=None, site=None, limit=20, offset=0):
         ).fetchone()[0]
         rows = connection.execute(
             f"""SELECT id, start_url, url, title, published_at, crawled_at,
-                       substr(cleaned_text, 1, 700)
+                       substr(cleaned_text, {excerpt_start}, 700),
+                       length(cleaned_text),
+                       {match_position}
                 FROM pages{where}
                 ORDER BY COALESCE(published_at, crawled_at) DESC, id DESC
                 LIMIT ? OFFSET ?""",
-            (*parameters, limit, offset),
+            (
+                *excerpt_parameters,
+                *parameters,
+                limit,
+                offset,
+            ),
         ).fetchall()
     finally:
         connection.close()
@@ -89,6 +124,8 @@ def list_pages(database, query=None, site=None, limit=20, offset=0):
         "total": total,
         "limit": limit,
         "offset": offset,
+        "search_fields": ["title", "text"],
+        "matched_terms": terms,
         "rights_status": RIGHTS_STATUS,
         "rights_notice": RIGHTS_NOTICE,
         "items": [
@@ -99,7 +136,11 @@ def list_pages(database, query=None, site=None, limit=20, offset=0):
                 "title": row[3],
                 "published_at": row[4],
                 "collected_at": row[5],
-                "excerpt": row[6] or "",
+                "excerpt": _contextual_excerpt(
+                    row[6] or "",
+                    row[7] or 0,
+                    row[8] or 0,
+                ),
                 "rights_status": RIGHTS_STATUS,
             }
             for row in rows
@@ -113,7 +154,7 @@ def get_page(database, page_id):
     try:
         row = connection.execute(
             """SELECT id, start_url, url, title, published_at, crawled_at, cleaned_text
-               FROM pages WHERE id=?""",
+               FROM pages WHERE id=? AND is_excluded_url(url)=0""",
             (page_id,),
         ).fetchone()
     finally:
@@ -128,8 +169,8 @@ def get_page(database, page_id):
         "title": row[3],
         "published_at": row[4],
         "collected_at": row[5],
-        "text": text[:MAX_DETAIL_TEXT],
-        "text_truncated": len(text) > MAX_DETAIL_TEXT,
+        "text": text,
+        "text_truncated": False,
         "rights_status": RIGHTS_STATUS,
         "rights_notice": RIGHTS_NOTICE,
     }
@@ -140,6 +181,7 @@ def list_documents(database, query=None, site=None, limit=20, offset=0):
     terms = _terms(query)
     filters = []
     parameters = []
+    filters.append("is_excluded_url(documents.url)=0")
     match_query = None
     if terms:
         match_query = " AND ".join(f'"{term}"' for term in terms)
@@ -162,7 +204,9 @@ def list_documents(database, query=None, site=None, limit=20, offset=0):
                        documents.page_count, documents.size_bytes,
                        documents.downloaded_at, documents.status,
                        CASE WHEN ? IS NULL THEN ''
-                            ELSE snippet(pdf_search, 3, '[', ']', ' … ', 14)
+                            ELSE snippet(
+                                pdf_search, 3, ?, ?, ' … ', 14
+                            )
                        END
                 FROM documents
                 JOIN pdf_search ON documents.id=pdf_search.rowid{where}
@@ -170,7 +214,15 @@ def list_documents(database, query=None, site=None, limit=20, offset=0):
                     CASE WHEN ? IS NOT NULL THEN bm25(pdf_search) ELSE 0 END,
                     documents.downloaded_at DESC, documents.title
                 LIMIT ? OFFSET ?""",
-            (match_query, *parameters, match_query, limit, offset),
+            (
+                match_query,
+                PDF_SNIPPET_START,
+                PDF_SNIPPET_END,
+                *parameters,
+                match_query,
+                limit,
+                offset,
+            ),
         ).fetchall()
     finally:
         connection.close()
@@ -178,6 +230,8 @@ def list_documents(database, query=None, site=None, limit=20, offset=0):
         "total": total,
         "limit": limit,
         "offset": offset,
+        "search_fields": ["title", "author", "site", "text"],
+        "matched_terms": terms,
         "rights_status": RIGHTS_STATUS,
         "rights_notice": RIGHTS_NOTICE,
         "items": [
@@ -192,7 +246,9 @@ def list_documents(database, query=None, site=None, limit=20, offset=0):
                 "size_bytes": row[7],
                 "collected_at": row[8],
                 "status": row[9],
-                "excerpt": row[10] or "",
+                "excerpt": (row[10] or "")
+                    .replace(PDF_SNIPPET_START, "")
+                    .replace(PDF_SNIPPET_END, ""),
                 "rights_status": RIGHTS_STATUS,
             }
             for row in rows
@@ -207,7 +263,7 @@ def get_document(database, document_id):
         row = connection.execute(
             """SELECT id, site_name, url, filename, title, author, page_count,
                       size_bytes, downloaded_at, status, extracted_text
-               FROM documents WHERE id=?""",
+               FROM documents WHERE id=? AND is_excluded_url(url)=0""",
             (document_id,),
         ).fetchone()
     finally:
@@ -226,8 +282,8 @@ def get_document(database, document_id):
         "size_bytes": row[7],
         "collected_at": row[8],
         "status": row[9],
-        "text": text[:MAX_DETAIL_TEXT],
-        "text_truncated": len(text) > MAX_DETAIL_TEXT,
+        "text": text,
+        "text_truncated": False,
         "rights_status": RIGHTS_STATUS,
         "rights_notice": RIGHTS_NOTICE,
     }
@@ -241,7 +297,27 @@ def _require_database(path, description):
 
 
 def _connect_readonly(path):
-    return sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=15)
+    connection = sqlite3.connect(
+        f"{path.as_uri()}?mode=ro",
+        uri=True,
+        timeout=15,
+    )
+    connection.create_function("is_excluded_url", 1, _is_excluded_url)
+    return connection
+
+
+def _is_excluded_url(url):
+    final_path_segment = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1]
+    return int(final_path_segment.lower() in {"pricing", "token"})
+
+
+def _contextual_excerpt(text, total_length, match_position):
+    if not text:
+        return ""
+    start_position = max(0, match_position - 351) if match_position else 0
+    prefix = "… " if start_position else ""
+    suffix = " …" if start_position + len(text) < total_length else ""
+    return f"{prefix}{text}{suffix}"
 
 
 def _terms(query):

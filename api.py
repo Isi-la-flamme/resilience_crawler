@@ -37,12 +37,15 @@ DASHBOARD = """<!doctype html>
     form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, .45fr) auto; gap: .6rem; }
     input, select, button { min-height: 44px; padding: .6rem .75rem; border: 1px solid #aab9b3; border-radius: .45rem; font: inherit; }
     button { background: #075b4c; color: white; border: 0; cursor: pointer; font-weight: 650; }
-    button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid #e4a52a; outline-offset: 2px; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #e4a52a; outline-offset: 2px; }
     #summary { margin: 1rem 0; color: #40534c; }
     article { background: white; border: 1px solid #dce5e0; border-radius: .55rem; padding: 1rem; margin: .7rem 0; }
     article h2 { margin: 0 0 .35rem; font-size: 1.08rem; }
     article p { margin: .45rem 0; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
-    article a { color: #075b4c; overflow-wrap: anywhere; }
+    .source-url { overflow-wrap: anywhere; }
+    .read-text { margin-top: .8rem; }
+    .full-text { max-height: 70vh; overflow: auto; border-top: 1px solid #dce5e0; margin-top: 1rem; padding-top: .7rem; }
+    mark { background: #ffe08a; color: inherit; border-radius: .15rem; padding: 0 .08rem; }
     .meta { color: #52645e; font-size: .9rem; }
     .tabs { display: flex; gap: .5rem; margin: 1rem 0; }
     .tabs button { background: #dce8e2; color: #17372e; }
@@ -60,8 +63,9 @@ DASHBOARD = """<!doctype html>
   <main>
     <aside class="notice">
       Prototype de recherche, pas un catalogue officiel. Les conditions de
-      réutilisation des contenus n’ont pas encore été vérifiées. Consultez
-      toujours la source institutionnelle.
+      réutilisation des contenus n’ont pas encore été vérifiées. Les textes
+      affichés proviennent des bases locales ; l’URL source est fournie comme
+      référence et n’est pas ouverte par ce portail.
     </aside>
     <section aria-labelledby="sites-heading">
       <h2 id="sites-heading">Sources disponibles</h2>
@@ -101,6 +105,25 @@ DASHBOARD = """<!doctype html>
       return node;
     }
 
+    function appendHighlighted(container, text) {
+      const terms = queryInput.value.match(/[\\p{L}\\p{N}]+/gu) || [];
+      if (!terms.length) {
+        container.textContent = text;
+        return;
+      }
+      const alternatives = [...new Set(terms)]
+        .sort((left, right) => right.length - left.length)
+        .map(term => term.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&"));
+      const matcher = new RegExp(`(${alternatives.join("|")})`, "giu");
+      let cursor = 0;
+      for (const match of text.matchAll(matcher)) {
+        container.append(document.createTextNode(text.slice(cursor, match.index)));
+        container.append(element("mark", match[0]));
+        cursor = match.index + match[0].length;
+      }
+      container.append(document.createTextNode(text.slice(cursor)));
+    }
+
     async function loadSites() {
       const response = await fetch("/api/v1/sites");
       if (!response.ok) throw new Error("Chargement des sources impossible");
@@ -119,16 +142,68 @@ DASHBOARD = """<!doctype html>
 
     function renderItem(item) {
       const card = element("article");
-      card.append(element("h2", item.title || item.filename || item.url));
+      const title = element("h2");
+      appendHighlighted(title, item.title || item.filename || item.url);
+      card.append(title);
       card.append(element("div", `${item.site} · ${item.rights_status}`, "meta"));
-      if (item.excerpt) card.append(element("p", item.excerpt));
-      if (item.text) card.append(element("p", item.text));
+      if (item.excerpt) {
+        card.append(element("div", "Extrait du texte", "meta"));
+        const excerpt = element("p");
+        appendHighlighted(excerpt, item.excerpt);
+        card.append(excerpt);
+      }
       if (item.status) card.append(element("p", `État du texte : ${item.status}`, "meta"));
-      const link = element("a", "Voir la source institutionnelle");
-      link.href = item.source_url || item.url;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      card.append(link);
+      card.append(element("p", `Source : ${item.source_url || item.url}`, "meta source-url"));
+      const detailKind = kind;
+      const detail = element("section");
+      detail.hidden = true;
+      detail.className = "full-text";
+      detail.setAttribute("aria-label", "Texte intégral");
+      const readButton = element("button", "Lire le texte intégral");
+      readButton.type = "button";
+      readButton.className = "read-text";
+      readButton.setAttribute("aria-expanded", "false");
+      readButton.addEventListener("click", async () => {
+        if (!detail.hidden) {
+          detail.hidden = true;
+          readButton.textContent = "Lire le texte intégral";
+          readButton.setAttribute("aria-expanded", "false");
+          return;
+        }
+        if (!detail.dataset.loaded) {
+          readButton.disabled = true;
+          readButton.textContent = "Chargement depuis la base locale…";
+          try {
+            const response = await fetch(`/api/v1/${detailKind}/${item.id}`);
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || "Lecture du texte impossible");
+            const heading = element("h3", data.title || data.filename || item.title);
+            detail.append(heading);
+            if (data.text) {
+              const fullText = element("p");
+              appendHighlighted(fullText, data.text);
+              detail.append(fullText);
+            } else {
+              detail.append(element(
+                "p",
+                data.status === "no_text"
+                  ? "Aucun texte n’a pu être extrait de ce PDF."
+                  : "Aucun texte disponible dans la base locale."
+              ));
+            }
+            detail.dataset.loaded = "true";
+          } catch (error) {
+            detail.replaceChildren(element("p", error.message, "meta"));
+            detail.dataset.loaded = "";
+          } finally {
+            readButton.disabled = false;
+          }
+        }
+        detail.hidden = false;
+        readButton.textContent = "Masquer le texte intégral";
+        readButton.setAttribute("aria-expanded", "true");
+      });
+      card.append(readButton, detail);
       return card;
     }
 
@@ -149,7 +224,16 @@ DASHBOARD = """<!doctype html>
         total = data.total;
         for (const item of data.items) results.append(renderItem(item));
         offset += data.items.length;
-        summary.textContent = `${total} résultat(s) · réutilisation non évaluée`;
+        const fieldLabels = {
+          title: "titre",
+          author: "auteur",
+          site: "site",
+          text: kind === "documents" ? "texte du PDF" : "texte",
+        };
+        const searchScope = data.search_fields
+          .map(field => fieldLabels[field] || field)
+          .join(", ");
+        summary.textContent = `${total} résultat(s) · recherche dans : ${searchScope} · réutilisation non évaluée`;
         moreButton.hidden = offset >= total;
       } catch (error) {
         summary.textContent = error.message;

@@ -26,9 +26,6 @@ class CrawlDatabase:
                 "UPDATE url_queue SET status='queued' WHERE status='fetching'"
             )
             self._connection.execute(
-                "UPDATE url_queue SET status='queued', error=NULL WHERE status='failed'"
-            )
-            self._connection.execute(
                 "UPDATE images SET status='queued' WHERE status='downloading'"
             )
             self._connection.execute("""
@@ -196,6 +193,84 @@ class CrawlDatabase:
                 "INSERT OR IGNORE INTO url_queue(start_url, url) VALUES (?, ?)",
                 ((start_url, url) for url in urls),
             )
+
+    def queued_start_urls(self, start_urls=None):
+        filters = ["queue.status='queued'"]
+        parameters = []
+        if start_urls is not None:
+            if not start_urls:
+                return []
+            placeholders = ",".join("?" for _ in start_urls)
+            filters.append(f"queue.start_url IN ({placeholders})")
+            parameters.extend(start_urls)
+        where = " AND ".join(filters)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""SELECT DISTINCT queue.start_url
+                    FROM url_queue AS queue
+                    WHERE {where}
+                      AND NOT EXISTS (
+                          SELECT 1 FROM pages
+                          WHERE pages.start_url=queue.start_url
+                            AND pages.url=queue.url
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM documents
+                          WHERE documents.start_url=queue.start_url
+                            AND documents.url=queue.url
+                      )
+                    ORDER BY queue.start_url""",
+                parameters,
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def ensure_start_url_queued(self, start_url):
+        if self.queued_start_urls([start_url]):
+            return 0
+        with self._lock:
+            saved_links = self._connection.execute(
+                "SELECT links_json FROM pages WHERE start_url=?",
+                (start_url,),
+            ).fetchall()
+
+        if saved_links:
+            urls = []
+            for (links_json,) in saved_links:
+                links = json.loads(links_json)
+                if not isinstance(links, list):
+                    raise ValueError(
+                        f"Les liens enregistrés pour {start_url} ne sont pas une liste."
+                    )
+                urls.extend(links)
+            if not urls:
+                return 0
+        else:
+            urls = [start_url]
+
+        with self._lock, self._connection:
+            cursor = self._connection.executemany(
+                "INSERT OR IGNORE INTO url_queue(start_url, url) VALUES (?, ?)",
+                ((start_url, url) for url in dict.fromkeys(urls)),
+            )
+        return cursor.rowcount
+
+    def retry_failed_urls(self, start_urls=None):
+        if start_urls == []:
+            return 0
+        filters = ["status='failed'"]
+        parameters = []
+        if start_urls is not None:
+            placeholders = ",".join("?" for _ in start_urls)
+            filters.append(f"start_url IN ({placeholders})")
+            parameters.extend(start_urls)
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                f"""UPDATE url_queue
+                   SET status='queued', error=NULL
+                   WHERE {' AND '.join(filters)}""",
+                parameters,
+            )
+        return cursor.rowcount
 
     def claim_next(self, start_url, include_existing=False):
         with self._lock, self._connection:

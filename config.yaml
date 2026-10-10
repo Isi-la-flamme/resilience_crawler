@@ -1,0 +1,18 @@
+start_urls:
+  - https://www.presidencedufaso.bf/
+
+   
+max_pages: 1000
+workers: 2
+delay: 0.5
+image_batch_size: 1
+timeout: 30
+retries: 2
+max_response_bytes: 52428800
+database_file: crawl.db
+database_flush_interval: 30
+images_dir: img
+documents_dir: documents
+log_file: crawler.log.jsonl
+crawler_name: Yennenga Crawl
+log_level: INFO

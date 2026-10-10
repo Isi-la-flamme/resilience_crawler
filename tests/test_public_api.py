@@ -82,6 +82,11 @@ class PublicApiTests(unittest.TestCase):
         self.assertIn("lang=\"fr\"", dashboard.text)
         self.assertIn("conditions de", dashboard.text)
         self.assertIn("réutilisation", dashboard.text)
+        self.assertIn("appendHighlighted", dashboard.text)
+        self.assertIn("item.source_url || item.url", dashboard.text)
+        self.assertIn("Lire le texte intégral", dashboard.text)
+        self.assertIn("fetch(`/api/v1/${detailKind}/${item.id}`)", dashboard.text)
+        self.assertNotIn('link.target = "_blank"', dashboard.text)
         self.assertEqual(health.json()["status"], "ok")
         self.assertEqual(health.json()["rights_status"], "not_assessed")
 
@@ -99,7 +104,38 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(sites.json()["items"][0]["rights_status"], "not_assessed")
         self.assertEqual(pages.json()["total"], 1)
         self.assertEqual(pages.json()["items"][0]["title"], "Budget 2026")
+        self.assertEqual(pages.json()["search_fields"], ["title", "text"])
+        self.assertEqual(pages.json()["matched_terms"], ["budget", "public"])
+        self.assertIn("budget public", pages.json()["items"][0]["excerpt"])
+        self.assertEqual(
+            pages.json()["items"][0]["source_url"],
+            "https://example.org/budget",
+        )
         self.assertEqual(pages.json()["items"][0]["rights_status"], "not_assessed")
+
+    def test_page_search_excerpt_is_centered_on_the_match(self):
+        pages = sqlite3.connect(self.pages_database)
+        pages.execute(
+            "UPDATE pages SET cleaned_text=? WHERE id=1",
+            (
+                "Début du rapport. " * 100
+                + "Conclusion avec mot-clef distinctif. "
+                + "Fin du rapport. " * 100,
+            ),
+        )
+        pages.commit()
+        pages.close()
+
+        response = self.client.get(
+            "/api/v1/pages",
+            params={"q": "budget distinctif"},
+        )
+        result = response.json()["items"][0]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("distinctif", result["excerpt"])
+        self.assertTrue(result["excerpt"].startswith("… "))
+        self.assertTrue(result["excerpt"].endswith(" …"))
 
     def test_page_detail_and_invalid_ids(self):
         page = self.client.get("/api/v1/pages/1")
@@ -116,6 +152,113 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(invalid_search.status_code, 422)
         self.assertEqual(invalid_site.status_code, 422)
 
+    def test_page_and_document_details_return_full_text_from_database(self):
+        expected_page_text = "Texte intégral " * 8_000
+        expected_pdf_text = "PDF intégral " * 8_000
+        pages = sqlite3.connect(self.pages_database)
+        pages.execute(
+            "UPDATE pages SET cleaned_text=? WHERE id=1",
+            (expected_page_text,),
+        )
+        pages.commit()
+        pages.close()
+
+        documents = sqlite3.connect(self.pdf_database)
+        documents.execute(
+            "UPDATE documents SET extracted_text=? WHERE id=1",
+            (expected_pdf_text,),
+        )
+        documents.commit()
+        documents.close()
+
+        page = self.client.get("/api/v1/pages/1").json()
+        document = self.client.get("/api/v1/documents/1").json()
+
+        self.assertEqual(page["text"], expected_page_text)
+        self.assertFalse(page["text_truncated"])
+        self.assertEqual(document["text"], expected_pdf_text)
+        self.assertFalse(document["text_truncated"])
+
+    def test_pricing_and_token_urls_are_hidden_from_api(self):
+        pages = sqlite3.connect(self.pages_database)
+        pages.executemany(
+            """INSERT INTO pages
+               (id, start_url, url, title, published_at, crawled_at, cleaned_text)
+               VALUES (?, 'https://example.org/', ?, ?, NULL, '2026-01-06', ?)""",
+            (
+                (
+                    3,
+                    "https://example.org/category/page/4/pricing//pricing",
+                    "Pricing page",
+                    "A pricing page.",
+                ),
+                (
+                    4,
+                    "https://example.org/nested/token/",
+                    "Token page",
+                    "A token page.",
+                ),
+            ),
+        )
+        pages.commit()
+        pages.close()
+
+        documents = sqlite3.connect(self.pdf_database)
+        hidden_documents = [
+            (
+                3,
+                "https://example.org/pricing/",
+                "pricing.pdf",
+                "Pricing PDF",
+            ),
+            (
+                4,
+                "https://example.org/nested/token",
+                "token.pdf",
+                "Token PDF",
+            ),
+        ]
+        documents.executemany(
+            """INSERT INTO documents
+               (id, site_name, url, filename, title, author, page_count,
+                size_bytes, downloaded_at, status, extracted_text)
+               VALUES (?, 'example.org', ?, ?, ?, NULL, 1, 100, '2026-01-06',
+                       'indexed', 'Excluded document text')""",
+            hidden_documents,
+        )
+        documents.executemany(
+            """INSERT INTO pdf_search
+               (rowid, title, author, site_name, extracted_text, url, local_path)
+               VALUES (?, ?, NULL, 'example.org', 'Excluded document text', ?, '')""",
+            (
+                (doc_id, title, url)
+                for doc_id, url, _, title in hidden_documents
+            ),
+        )
+        documents.commit()
+        documents.close()
+
+        pages_response = self.client.get("/api/v1/pages")
+        hidden_page = self.client.get("/api/v1/pages/3")
+        documents_response = self.client.get("/api/v1/documents")
+        hidden_document = self.client.get("/api/v1/documents/3")
+        sites = self.client.get("/api/v1/sites").json()["items"][0]
+
+        self.assertEqual(pages_response.json()["total"], 2)
+        self.assertTrue(all(
+            not item["source_url"].rstrip("/").endswith(("pricing", "token"))
+            for item in pages_response.json()["items"]
+        ))
+        self.assertEqual(hidden_page.status_code, 404)
+        self.assertEqual(documents_response.json()["total"], 2)
+        self.assertTrue(all(
+            not item["source_url"].rstrip("/").endswith(("pricing", "token"))
+            for item in documents_response.json()["items"]
+        ))
+        self.assertEqual(hidden_document.status_code, 404)
+        self.assertEqual(sites["pages"], 2)
+        self.assertEqual(sites["documents"], 2)
+
     def test_pdf_search_returns_source_and_keeps_non_text_documents_listed(self):
         search = self.client.get(
             "/api/v1/documents",
@@ -130,6 +273,14 @@ class PublicApiTests(unittest.TestCase):
         result = search.json()["items"][0]
         self.assertEqual(result["title"], "Budget national")
         self.assertEqual(result["source_url"], "https://example.org/budget.pdf")
+        self.assertEqual(
+            search.json()["search_fields"],
+            ["title", "author", "site", "text"],
+        )
+        self.assertEqual(search.json()["matched_terms"], ["budget", "national"])
+        self.assertIn("Budget national", result["excerpt"])
+        self.assertNotIn("\ue000", result["excerpt"])
+        self.assertNotIn("\ue001", result["excerpt"])
         self.assertEqual(result["rights_status"], "not_assessed")
         self.assertEqual(all_documents.json()["total"], 2)
         self.assertEqual(
