@@ -515,13 +515,14 @@ pas à lui seul qu’un test a échoué.
 ├── crawler/
 │   ├── cleaner.py          # Nettoyage HTML et génération de la base texte
 │   ├── database.py         # Stockage et file d’URL SQLite
-│   ├── engine.py           # Coordination du crawl
+│   ├── engine.py           # Configuration et orchestration du crawler
 │   ├── excel_export.py     # Export Excel
 │   ├── fetcher.py          # Requêtes HTTP
 │   ├── file_store.py       # Téléchargement et stockage des fichiers
 │   ├── parser.py           # Extraction des données des pages
 │   ├── pdf_index.py        # Extraction et recherche de PDF
-│   └── public_api.py       # Requêtes en lecture seule pour l’API
+│   ├── public_api.py       # Requêtes en lecture seule pour l’API
+│   └── scheduler.py        # File partagée, workers et suivi des tâches
 ├── pdf_index.py            # CLI d’indexation et de recherche PDF
 ├── requirements.txt        # Dépendances d’exécution
 ├── requirements-dev.txt    # Dépendances de test

@@ -193,26 +193,165 @@ class CleanerTests(unittest.TestCase):
         self.assertEqual(word_count, len(text.split()))
         self.assertNotIn("Navigation", headings)
 
-    def test_refuses_to_overwrite_source_or_existing_destination(self):
+    def test_appends_new_pages_without_replacing_existing_pages(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = Path(temp_dir) / "crawl.db"
             output_path = Path(temp_dir) / "clean.db"
-            connection = sqlite3.connect(source_path)
-            connection.executescript("""
-                CREATE TABLE pages (
-                    id INTEGER PRIMARY KEY, start_url TEXT, url TEXT, url_hash TEXT,
-                    title TEXT, published_at TEXT, content TEXT, html TEXT,
-                    crawler_name TEXT, links_json TEXT, images_json TEXT, crawled_at TEXT
-                );
-            """)
-            connection.close()
+            start_url = "https://example.org/"
+            original_text = "Texte initial à conserver. " * 30
+            with CrawlDatabase(source_path) as database:
+                database.save_page(start_url, {
+                    "url": f"{start_url}existing",
+                    "title": "Page existante",
+                    "content": original_text,
+                    "html": f"<html><body><p>{original_text}</p></body></html>",
+                    "crawler_name": "Test",
+                    "links": [],
+                    "images": [],
+                }, [])
+            clean_database(source_path, output_path)
 
             with self.assertRaisesRegex(ValueError, "différente"):
                 clean_database(source_path, source_path)
 
-            output_path.touch()
-            with self.assertRaises(FileExistsError):
-                clean_database(source_path, output_path)
+            with CrawlDatabase(source_path) as database:
+                changed_text = "Texte modifié ne devant pas remplacer l'existant. " * 20
+                database.save_page(start_url, {
+                    "url": f"{start_url}existing",
+                    "title": "Titre modifié",
+                    "content": changed_text,
+                    "html": f"<html><body><p>{changed_text}</p></body></html>",
+                    "crawler_name": "Test",
+                    "links": [],
+                    "images": [],
+                }, [])
+                new_text = "Nouvelle page ajoutée à la base nettoyée. " * 20
+                database.save_page(start_url, {
+                    "url": f"{start_url}new",
+                    "title": "Nouvelle page",
+                    "content": new_text,
+                    "html": f"<html><body><p>{new_text}</p></body></html>",
+                    "crawler_name": "Test",
+                    "links": [],
+                    "images": [],
+                }, [])
+
+            first_counts = clean_database(source_path, output_path)
+            second_counts = clean_database(source_path, output_path)
+            cleaned = sqlite3.connect(output_path)
+            try:
+                pages = cleaned.execute(
+                    "SELECT url,title,cleaned_text FROM pages ORDER BY url"
+                ).fetchall()
+                report = cleaned.execute(
+                    "SELECT source_pages,cleaned_pages FROM site_report WHERE start_url=?",
+                    (start_url,),
+                ).fetchone()
+            finally:
+                cleaned.close()
+
+        self.assertEqual(first_counts["pages"], 2)
+        self.assertEqual(second_counts["pages"], 2)
+        self.assertEqual(len(pages), 2)
+        self.assertEqual(pages[0][1], "Page existante")
+        self.assertEqual(pages[0][2], original_text.strip())
+        self.assertEqual(pages[1][1], "Nouvelle page")
+        self.assertEqual(pages[1][2], new_text.strip())
+        self.assertEqual(report, (2, 2))
+
+    def test_appending_migrates_legacy_clean_database(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "crawl.db"
+            output_path = root / "clean.db"
+            start_url = "https://example.org/"
+            old_text = "Ancienne page déjà préparée. " * 25
+            legacy = sqlite3.connect(output_path)
+            legacy.executescript("""
+                CREATE TABLE pages (
+                    id INTEGER PRIMARY KEY,
+                    start_url TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    url_hash TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    published_at TEXT,
+                    content TEXT,
+                    cleaned_text TEXT NOT NULL,
+                    crawler_name TEXT NOT NULL,
+                    links_json TEXT NOT NULL,
+                    images_json TEXT NOT NULL,
+                    crawled_at TEXT NOT NULL,
+                    UNIQUE (start_url, url)
+                );
+                CREATE TABLE boilerplate_blocks (
+                    start_url TEXT NOT NULL,
+                    signature TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    occurrences INTEGER NOT NULL,
+                    required_pages INTEGER NOT NULL,
+                    sample_text TEXT NOT NULL,
+                    PRIMARY KEY (start_url, signature)
+                );
+                CREATE TABLE site_report (
+                    start_url TEXT PRIMARY KEY,
+                    source_pages INTEGER NOT NULL,
+                    cleaned_pages INTEGER NOT NULL DEFAULT 0,
+                    repeated_blocks INTEGER NOT NULL DEFAULT 0,
+                    removed_blocks INTEGER NOT NULL DEFAULT 0,
+                    source_html_bytes INTEGER NOT NULL DEFAULT 0,
+                    cleaned_text_bytes INTEGER NOT NULL DEFAULT 0
+                );
+            """)
+            legacy.execute(
+                """INSERT INTO pages
+                   VALUES (1, ?, ?, 'legacy-hash', 'Ancienne actualité', NULL, NULL,
+                           ?, 'Test', '[]', '[]', '2026-01-01')""",
+                (
+                    start_url,
+                    f"{start_url}informations/actualites/old",
+                    old_text,
+                ),
+            )
+            legacy.execute(
+                "INSERT INTO site_report(start_url,source_pages,cleaned_pages) VALUES(?,1,1)",
+                (start_url,),
+            )
+            legacy.commit()
+            legacy.close()
+
+            new_text = "Contenu éditorial de la nouvelle page. " * 25
+            with CrawlDatabase(source_path) as database:
+                database.save_page(start_url, {
+                    "url": f"{start_url}informations/actualites/new",
+                    "title": "Nouvelle actualité",
+                    "content": new_text,
+                    "html": (
+                        '<html lang="fr"><body><article><h1>Nouvelle actualité</h1>'
+                        f"<p>{new_text}</p></article></body></html>"
+                    ),
+                    "crawler_name": "Test",
+                    "links": [],
+                    "images": [],
+                }, [])
+
+            clean_database(source_path, output_path)
+            cleaned = sqlite3.connect(output_path)
+            try:
+                rows = cleaned.execute(
+                    "SELECT url,page_type,word_count FROM pages ORDER BY url"
+                ).fetchall()
+                columns = {
+                    row[1] for row in cleaned.execute("PRAGMA table_info(pages)")
+                }
+            finally:
+                cleaned.close()
+
+        self.assertEqual(len(rows), 2)
+        self.assertIn("page_type", columns)
+        self.assertIn("headings_json", columns)
+        self.assertEqual(rows[0][1], "article")
+        self.assertGreater(rows[0][2], 0)
+        self.assertEqual(rows[1][1], "article")
 
 
 if __name__ == "__main__":

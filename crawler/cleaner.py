@@ -142,6 +142,16 @@ def _append_clean_database(source_path, output_path):
             )
             target.execute("BEGIN IMMEDIATE")
             _migrate_output_schema(target)
+            added_by_site = dict(target.execute("""
+                SELECT incoming_pages.start_url, COUNT(*)
+                FROM incoming.pages AS incoming_pages
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM main.pages AS existing_pages
+                    WHERE existing_pages.start_url=incoming_pages.start_url
+                      AND existing_pages.url=incoming_pages.url
+                )
+                GROUP BY incoming_pages.start_url
+            """).fetchall())
             target.execute("""
                 INSERT OR IGNORE INTO main.pages
                     (start_url, url, url_hash, title, published_at, content,
@@ -172,6 +182,16 @@ def _append_clean_database(source_path, output_path):
                 FROM incoming.site_report
             """).fetchall()
             for start_url, source_pages, removed_blocks, source_html_bytes in incoming_reports:
+                existing_source_pages = target.execute(
+                    "SELECT source_pages FROM main.site_report WHERE start_url=?",
+                    (start_url,),
+                ).fetchone()
+                merged_source_pages = (
+                    source_pages
+                    if existing_source_pages is None
+                    or source_pages > existing_source_pages[0]
+                    else existing_source_pages[0] + added_by_site.get(start_url, 0)
+                )
                 target.execute("""
                     INSERT INTO main.site_report
                         (start_url, source_pages, cleaned_pages, repeated_blocks,
@@ -189,7 +209,12 @@ def _append_clean_database(source_path, output_path):
                             site_report.source_html_bytes,
                             excluded.source_html_bytes
                         )
-                """, (start_url, source_pages, removed_blocks, source_html_bytes))
+                """, (
+                    start_url,
+                    merged_source_pages,
+                    removed_blocks,
+                    source_html_bytes,
+                ))
                 target.execute("""
                     UPDATE main.site_report
                     SET cleaned_pages=(
@@ -213,13 +238,16 @@ def _append_clean_database(source_path, output_path):
         finally:
             target.close()
 
-        with sqlite3.connect(output_path) as connection:
+        connection = sqlite3.connect(output_path)
+        try:
             counts = {
                 table: connection.execute(
                     f"SELECT COUNT(*) FROM {table}"
                 ).fetchone()[0]
                 for table in ("pages", "boilerplate_blocks", "site_report")
             }
+        finally:
+            connection.close()
         logger.info("Clean database updated at %s: %s", output_path, counts)
         return counts
     finally:
