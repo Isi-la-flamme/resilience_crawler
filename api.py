@@ -17,7 +17,7 @@ from crawler.public_api import (
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_PAGES_DATABASE = PROJECT_ROOT / "crawl-clean.db"
+DEFAULT_PAGES_DATABASE = PROJECT_ROOT / "clean_crawl.db"
 DEFAULT_PDF_DATABASE = PROJECT_ROOT / "pdf-index.db"
 DEFAULT_CRAWL_DATABASE = PROJECT_ROOT / "crawl.db"
 DEFAULT_IMAGES_DIRECTORY = PROJECT_ROOT / "img"
@@ -194,6 +194,29 @@ DASHBOARD = """<!doctype html>
       appendHighlighted(title, item.title || item.filename || item.url);
       card.append(title);
       card.append(element("div", `${item.site} · ${item.rights_status}`, "meta"));
+      const pageFacts = [];
+      const pageTypeLabels = {
+        article: "Actualité / article",
+        meeting_report: "Compte rendu",
+        event: "Événement",
+        resource: "Ressource",
+        institution: "Page institutionnelle",
+      };
+      if (item.page_type && item.page_type !== "page") {
+        pageFacts.push(`Type : ${pageTypeLabels[item.page_type] || item.page_type}`);
+      }
+      if (item.published_at) pageFacts.push(`Publié le ${item.published_at}`);
+      if (item.language) pageFacts.push(`Langue : ${item.language}`);
+      if (item.word_count !== null && item.word_count !== undefined) {
+        pageFacts.push(`${item.word_count} mots`);
+      }
+      if (pageFacts.length) card.append(element("p", pageFacts.join(" · "), "meta"));
+      if (item.description) {
+        card.append(element("p", item.description, "meta"));
+      }
+      if (item.keywords && item.keywords.length) {
+        card.append(element("p", `Mots-clés : ${item.keywords.join(", ")}`, "meta"));
+      }
       if (item.excerpt) {
         card.append(element("div", "Extrait du texte", "meta"));
         const excerpt = element("p");
@@ -227,6 +250,17 @@ DASHBOARD = """<!doctype html>
             if (!response.ok) throw new Error(data.detail || "Lecture du texte impossible");
             const heading = element("h3", data.title || data.filename || item.title);
             detail.append(heading);
+            if (data.headings && data.headings.length) {
+              detail.append(element("div", "Structure de la page", "meta"));
+              const outline = element("ol");
+              for (const pageHeading of data.headings) {
+                outline.append(element(
+                  "li",
+                  `H${pageHeading.level} — ${pageHeading.text}`
+                ));
+              }
+              detail.append(outline);
+            }
             if (data.text) {
               const fullText = element("p");
               appendHighlighted(fullText, data.text);
@@ -256,6 +290,7 @@ DASHBOARD = """<!doctype html>
     }
 
     async function search(reset = true) {
+      const searchStartedAt = performance.now();
       if (reset) {
         offset = 0;
         results.replaceChildren();
@@ -284,9 +319,11 @@ DASHBOARD = """<!doctype html>
         const searchScope = data.search_fields
           .map(field => fieldLabels[field] || field)
           .join(", ");
-        summary.textContent = `${total} résultat(s) · recherche dans : ${searchScope} · réutilisation non évaluée`;
         results.classList.toggle("gallery", kind === "images");
         moreButton.hidden = offset >= total;
+        const elapsedSeconds = ((performance.now() - searchStartedAt) / 1000)
+          .toLocaleString("fr-FR", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+        summary.textContent = `${total} résultat(s) · recherche dans : ${searchScope} · temps : ${elapsedSeconds} s · réutilisation non évaluée`;
       } catch (error) {
         summary.textContent = error.message;
       }

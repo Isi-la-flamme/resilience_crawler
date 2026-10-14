@@ -12,8 +12,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
             "Extrait le texte exploitable des pages, retire le head et les blocs "
-            "répétés, exclut les textes de moins de 500 caractères et crée une "
-            "nouvelle base SQLite."
+            "répétés, exclut les textes de moins de 500 caractères et ajoute les "
+            "nouvelles pages à la base SQLite."
         )
     )
     parser.add_argument(
@@ -25,8 +25,8 @@ def main(argv=None):
     parser.add_argument(
         "--output-db",
         type=Path,
-        default=PROJECT_ROOT / "crawl-clean.db",
-        help="Nouvelle base SQLite avec le texte brut (défaut : crawl-clean.db)",
+        default=PROJECT_ROOT / "clean_crawl.db",
+        help="Base SQLite nettoyée (défaut : clean_crawl.db)",
     )
     args = parser.parse_args(argv)
 

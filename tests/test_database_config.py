@@ -19,6 +19,12 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertEqual(DEFAULT_CONFIG_PATH.name, "config.yaml")
         self.assertTrue(DEFAULT_CONFIG_PATH.is_file())
 
+    def test_default_yaml_configuration_loads(self):
+        config = load_config(DEFAULT_CONFIG_PATH)
+        self.assertIn("start_urls", config)
+        self.assertTrue(config["start_urls"])
+        self.assertEqual(config["database_path"], DEFAULT_CONFIG_PATH.parent / config["database_file"])
+
     def test_loads_yaml_configuration_and_resolves_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.yaml"

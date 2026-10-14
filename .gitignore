@@ -20,6 +20,8 @@ crawl-export.xlsx
 crawl-results.jsonl
 crawler.log.jsonl
 
+clean_crawl.db
+communication-clean.db
 .vscode/
 *.egg-info/
 

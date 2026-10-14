@@ -2,6 +2,7 @@
 
 import hashlib
 import html
+import json
 import logging
 import math
 import os
@@ -10,6 +11,7 @@ import sqlite3
 import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .parser import PageParser
 
@@ -35,17 +37,18 @@ TEXT_WHITESPACE = re.compile(r"\s+")
 
 
 def clean_database(source_path, output_path):
-    """Crée une base de texte nettoyée sans modifier la base source.
+    """Ajoute les pages nettoyées à une base de texte sans modifier la source.
 
     Le traitement identifie les blocs récurrents par site, retire les éléments
     de navigation et boilerplate, puis conserve uniquement les pages dont le
     texte final contient au moins `MIN_CLEANED_TEXT_LENGTH` caractères. La
-    sortie doit être nouvelle ; elle est construite dans un fichier temporaire
-    et publiée atomiquement après validation.
+    sortie est créée si elle n'existe pas ; sinon les pages absentes y sont
+    ajoutées, sans remplacer les URL déjà présentes. Une nouvelle exécution
+    sur la même source est donc idempotente.
 
     Args:
         source_path: Base crawler contenant la table `pages` et le HTML original.
-        output_path: Nouveau chemin SQLite de sortie.
+        output_path: Chemin SQLite de la base nettoyée.
 
     Returns:
         Compteurs de pages nettoyées, blocs répétitifs et rapports par site.
@@ -53,7 +56,6 @@ def clean_database(source_path, output_path):
     Raises:
         ValueError: Si la source et la sortie désignent le même fichier.
         FileNotFoundError: Si la base source n'existe pas.
-        FileExistsError: Si la sortie existe déjà.
         sqlite3.Error: Si la base source ne respecte pas le schéma attendu.
     """
     source_path = Path(source_path).resolve()
@@ -63,7 +65,7 @@ def clean_database(source_path, output_path):
     if not source_path.is_file():
         raise FileNotFoundError(f"Base source introuvable : {source_path}")
     if output_path.exists():
-        raise FileExistsError(f"La base de sortie existe déjà : {output_path}")
+        return _append_clean_database(source_path, output_path)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = None
@@ -117,6 +119,143 @@ def clean_database(source_path, output_path):
         raise
 
 
+def _append_clean_database(source_path, output_path):
+    """Nettoie la source dans une base temporaire puis fusionne sans écraser."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    incoming_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{output_path.name}-incoming-",
+            suffix=".db",
+            dir=output_path.parent,
+            delete=False,
+        ) as temporary_file:
+            incoming_path = Path(temporary_file.name)
+        incoming_path.unlink()
+
+        clean_database(source_path, incoming_path)
+        target = sqlite3.connect(output_path, timeout=30, uri=True)
+        try:
+            target.execute(
+                "ATTACH DATABASE ? AS incoming",
+                (f"{incoming_path.as_uri()}?mode=ro",),
+            )
+            target.execute("BEGIN IMMEDIATE")
+            _migrate_output_schema(target)
+            target.execute("""
+                INSERT OR IGNORE INTO main.pages
+                    (start_url, url, url_hash, title, published_at, content,
+                     cleaned_text, page_type, language, meta_description,
+                     meta_keywords_json, headings_json, word_count, crawler_name,
+                     links_json, images_json, crawled_at)
+                SELECT start_url, url, url_hash, title, published_at, content,
+                       cleaned_text, page_type, language, meta_description,
+                       meta_keywords_json, headings_json, word_count, crawler_name,
+                       links_json, images_json, crawled_at
+                FROM incoming.pages
+            """)
+            target.execute("""
+                INSERT INTO main.boilerplate_blocks
+                    (start_url, signature, tag, occurrences, required_pages, sample_text)
+                SELECT start_url, signature, tag, occurrences, required_pages, sample_text
+                FROM incoming.boilerplate_blocks
+                WHERE 1
+                ON CONFLICT(start_url, signature) DO UPDATE SET
+                    occurrences=MAX(boilerplate_blocks.occurrences, excluded.occurrences),
+                    required_pages=MAX(
+                        boilerplate_blocks.required_pages,
+                        excluded.required_pages
+                    )
+            """)
+            incoming_reports = target.execute("""
+                SELECT start_url, source_pages, removed_blocks, source_html_bytes
+                FROM incoming.site_report
+            """).fetchall()
+            for start_url, source_pages, removed_blocks, source_html_bytes in incoming_reports:
+                target.execute("""
+                    INSERT INTO main.site_report
+                        (start_url, source_pages, cleaned_pages, repeated_blocks,
+                         removed_blocks, source_html_bytes, cleaned_text_bytes)
+                    VALUES (
+                        ?, ?, 0, 0, ?, ?, 0
+                    )
+                    ON CONFLICT(start_url) DO UPDATE SET
+                        source_pages=MAX(site_report.source_pages, excluded.source_pages),
+                        removed_blocks=MAX(
+                            site_report.removed_blocks,
+                            excluded.removed_blocks
+                        ),
+                        source_html_bytes=MAX(
+                            site_report.source_html_bytes,
+                            excluded.source_html_bytes
+                        )
+                """, (start_url, source_pages, removed_blocks, source_html_bytes))
+                target.execute("""
+                    UPDATE main.site_report
+                    SET cleaned_pages=(
+                            SELECT COUNT(*) FROM main.pages
+                            WHERE pages.start_url=?
+                        ),
+                        repeated_blocks=(
+                            SELECT COUNT(*) FROM main.boilerplate_blocks
+                            WHERE boilerplate_blocks.start_url=?
+                        ),
+                        cleaned_text_bytes=COALESCE((
+                            SELECT SUM(length(CAST(cleaned_text AS BLOB)))
+                            FROM main.pages WHERE pages.start_url=?
+                        ), 0)
+                    WHERE start_url=?
+                """, (start_url, start_url, start_url, start_url))
+            target.commit()
+        except Exception:
+            target.rollback()
+            raise
+        finally:
+            target.close()
+
+        with sqlite3.connect(output_path) as connection:
+            counts = {
+                table: connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+                for table in ("pages", "boilerplate_blocks", "site_report")
+            }
+        logger.info("Clean database updated at %s: %s", output_path, counts)
+        return counts
+    finally:
+        if incoming_path is not None:
+            incoming_path.unlink(missing_ok=True)
+
+
+def _migrate_output_schema(connection):
+    """Ajoute les colonnes enrichies aux bases nettoyées plus anciennes."""
+    columns = {
+        row[1] for row in connection.execute("PRAGMA main.table_info(pages)")
+    }
+    migrations = (
+        ("page_type", "TEXT NOT NULL DEFAULT 'page'"),
+        ("language", "TEXT"),
+        ("meta_description", "TEXT"),
+        ("meta_keywords_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("headings_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("word_count", "INTEGER NOT NULL DEFAULT 0"),
+    )
+    for column, declaration in migrations:
+        if column not in columns:
+            connection.execute(
+                f"ALTER TABLE main.pages ADD COLUMN {column} {declaration}"
+            )
+
+    for page_id, url, text in connection.execute(
+        "SELECT id, url, cleaned_text FROM main.pages WHERE word_count=0"
+    ):
+        word_count = len(re.findall(r"[^\W_]+", text or "", flags=re.UNICODE))
+        connection.execute(
+            "UPDATE main.pages SET page_type=?, word_count=? WHERE id=?",
+            (_classify_page(url), word_count, page_id),
+        )
+
+
 def _create_output_schema(connection):
     """Crée les tables de pages nettoyées, de boilerplate et de rapports."""
     connection.executescript("""
@@ -130,6 +269,12 @@ def _create_output_schema(connection):
             published_at TEXT,
             content TEXT,
             cleaned_text TEXT NOT NULL,
+            page_type TEXT NOT NULL,
+            language TEXT,
+            meta_description TEXT,
+            meta_keywords_json TEXT NOT NULL,
+            headings_json TEXT NOT NULL,
+            word_count INTEGER NOT NULL,
             crawler_name TEXT NOT NULL,
             links_json TEXT NOT NULL,
             images_json TEXT NOT NULL,
@@ -278,11 +423,17 @@ def _clean_pages(source, target, repeated_blocks):
             cleaned_text = PageParser.parse_html(cleaned_body_html)[4]
             include_page = len(cleaned_text) >= MIN_CLEANED_TEXT_LENGTH
             if include_page:
+                metadata = PageMetadataExtractor.extract(
+                    source_html or "",
+                    cleaned_body_html,
+                )
                 target.execute(
                     """INSERT INTO pages
                        (id, start_url, url, url_hash, title, published_at, content,
-                        cleaned_text, crawler_name, links_json, images_json, crawled_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        cleaned_text, page_type, language, meta_description,
+                        meta_keywords_json, headings_json, word_count, crawler_name,
+                        links_json, images_json, crawled_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         page_id,
                         start_url,
@@ -292,6 +443,12 @@ def _clean_pages(source, target, repeated_blocks):
                         published_at,
                         content,
                         cleaned_text,
+                        _classify_page(url),
+                        metadata["language"],
+                        metadata["description"],
+                        json.dumps(metadata["keywords"], ensure_ascii=False),
+                        json.dumps(metadata["headings"], ensure_ascii=False),
+                        len(re.findall(r"[^\W_]+", cleaned_text, flags=re.UNICODE)),
                         crawler_name,
                         links_json,
                         images_json,
@@ -345,6 +502,96 @@ def _write_site_reports(target, site_page_counts):
                 for start_url, page_count in site_page_counts.items()
             ),
         )
+
+
+def _classify_page(url):
+    """Classe la page à partir de segments explicites de son URL."""
+    segments = {
+        segment.casefold()
+        for segment in urlsplit(url).path.split("/")
+        if segment
+    }
+    if "conseils-des-ministres" in segments:
+        return "meeting_report"
+    if segments.intersection({"actualites", "articles"}):
+        return "article"
+    if segments.intersection({"evenements", "evenements-1", "snc", "fespaco"}):
+        return "event"
+    if segments.intersection({"ressources", "documents", "mediatheque"}):
+        return "resource"
+    if segments.intersection({"ministere", "ministre"}):
+        return "institution"
+    return "page"
+
+
+class PageMetadataExtractor(HTMLParser):
+    """Extrait les métadonnées publiées et les titres structurants d'une page."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.language = None
+        self.description = None
+        self.keywords = []
+        self.headings = []
+        self._active_heading = None
+
+    @classmethod
+    def extract(cls, source_html, cleaned_html):
+        """Retourne métadonnées éditoriales et titres du HTML nettoyé."""
+        source_parser = cls()
+        source_parser.feed(source_html)
+        source_parser.close()
+
+        heading_parser = cls()
+        heading_parser.feed(cleaned_html)
+        heading_parser.close()
+        return {
+            "language": source_parser.language,
+            "description": source_parser.description,
+            "keywords": source_parser.keywords,
+            "headings": heading_parser.headings,
+        }
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "html" and attrs.get("lang"):
+            self.language = attrs["lang"].strip().lower() or None
+        if tag == "meta":
+            name = (
+                attrs.get("name")
+                or attrs.get("property")
+                or attrs.get("itemprop")
+                or ""
+            ).strip().casefold()
+            value = (attrs.get("content") or "").strip()
+            if name in {"description", "og:description", "twitter:description"}:
+                if value and not self.description:
+                    self.description = value
+            elif name == "keywords" and value and not self.keywords:
+                self.keywords = list(dict.fromkeys(
+                    keyword.strip()
+                    for keyword in re.split(r"[,;]", value)
+                    if keyword.strip()
+                ))
+        elif len(tag) == 2 and tag[0] == "h" and tag[1].isdigit():
+            self._active_heading = {"level": int(tag[1]), "parts": []}
+
+    def handle_endtag(self, tag):
+        if (
+            self._active_heading is not None
+            and tag == f"h{self._active_heading['level']}"
+        ):
+            text = " ".join("".join(self._active_heading["parts"]).split())
+            if text:
+                self.headings.append({
+                    "level": self._active_heading["level"],
+                    "text": text,
+                })
+            self._active_heading = None
+
+    def handle_data(self, data):
+        if self._active_heading is not None:
+            self._active_heading["parts"].append(data)
 
 
 class BodyHTMLCleaner(HTMLParser):

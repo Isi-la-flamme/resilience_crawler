@@ -16,7 +16,7 @@ Install dependencies, then start the server bound to localhost:
 
 Open <http://127.0.0.1:8000/> for the dashboard or
 <http://127.0.0.1:8000/docs> for interactive API documentation. The service
-defaults to `crawl-clean.db`, `pdf-index.db`, `crawl.db`, and `img/` in the
+defaults to `clean_crawl.db`, `pdf-index.db`, `crawl.db`, and `img/` in the
 project directory. Override those paths with `OPENDATA_PAGES_DB`,
 `OPENDATA_PDF_DB`, `OPENDATA_CRAWL_DB`, and `OPENDATA_IMAGES_DIR`.
 `OPENDATA_HOST` defaults to `127.0.0.1`; do not expose this prototype directly
@@ -52,6 +52,10 @@ PDF excerpts come from the local text or full-text index. The dashboard
 highlights query terms in titles, excerpts, and full text. Select
 **Lire le texte intégral** on a result to fetch its complete text from the local SQLite-backed API; the
 detail endpoints return all text stored in the database without truncation.
+Page responses also expose extracted language, description, declared keywords,
+heading outline, word count, and a page type inferred from URL path segments.
+These fields are optional when reading older clean databases, and no summary
+or keyword is invented when the source HTML does not provide one.
 No request is made to the institution's website when opening a result. The
 source URL is displayed as provenance, not as a link. PDF files themselves
 are not served; only extracted text stored in the local index is displayed.

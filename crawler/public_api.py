@@ -1,5 +1,6 @@
 """Lectures en lecture seule des bases locales pour le portail Open Data."""
 
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -138,6 +139,17 @@ def list_pages(database, query=None, site=None, limit=20, offset=0, match_mode="
         excerpt_parameters = []
     connection = _connect_readonly(database)
     try:
+        page_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(pages)")
+        }
+        metadata_columns = (
+            _optional_column(page_columns, "page_type"),
+            _optional_column(page_columns, "language"),
+            _optional_column(page_columns, "meta_description"),
+            _optional_column(page_columns, "meta_keywords_json", "'[]'"),
+            _optional_column(page_columns, "headings_json", "'[]'"),
+            _optional_column(page_columns, "word_count"),
+        )
         total = connection.execute(
             f"SELECT COUNT(*) FROM pages{where}",
             parameters,
@@ -146,7 +158,8 @@ def list_pages(database, query=None, site=None, limit=20, offset=0, match_mode="
             f"""SELECT id, start_url, url, title, published_at, crawled_at,
                        substr(cleaned_text, {excerpt_start}, 700),
                        length(cleaned_text),
-                       {match_position}
+                       {match_position},
+                       {", ".join(metadata_columns)}
                 FROM pages{where}
                 ORDER BY COALESCE(published_at, crawled_at) DESC, id DESC
                 LIMIT ? OFFSET ?""",
@@ -181,6 +194,12 @@ def list_pages(database, query=None, site=None, limit=20, offset=0, match_mode="
                     row[7] or 0,
                     row[8] or 0,
                 ),
+                "page_type": row[9] or "page",
+                "language": row[10],
+                "description": row[11],
+                "keywords": _json_list(row[12]),
+                "headings": _json_list(row[13]),
+                "word_count": row[14],
                 "rights_status": RIGHTS_STATUS,
             }
             for row in rows
@@ -196,8 +215,20 @@ def get_page(database, page_id):
     database = _require_database(database, "base de pages")
     connection = _connect_readonly(database)
     try:
+        page_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(pages)")
+        }
+        metadata_columns = (
+            _optional_column(page_columns, "page_type"),
+            _optional_column(page_columns, "language"),
+            _optional_column(page_columns, "meta_description"),
+            _optional_column(page_columns, "meta_keywords_json", "'[]'"),
+            _optional_column(page_columns, "headings_json", "'[]'"),
+            _optional_column(page_columns, "word_count"),
+        )
         row = connection.execute(
-            """SELECT id, start_url, url, title, published_at, crawled_at, cleaned_text
+            f"""SELECT id, start_url, url, title, published_at, crawled_at, cleaned_text,
+                       {", ".join(metadata_columns)}
                FROM pages WHERE id=? AND is_excluded_url(url)=0""",
             (page_id,),
         ).fetchone()
@@ -215,6 +246,12 @@ def get_page(database, page_id):
         "collected_at": row[5],
         "text": text,
         "text_truncated": False,
+        "page_type": row[7] or "page",
+        "language": row[8],
+        "description": row[9],
+        "keywords": _json_list(row[10]),
+        "headings": _json_list(row[11]),
+        "word_count": row[12],
         "rights_status": RIGHTS_STATUS,
         "rights_notice": RIGHTS_NOTICE,
     }
@@ -512,6 +549,23 @@ def _connect_readonly(path):
     connection.create_function("is_excluded_url", 1, _is_excluded_url)
     connection.create_function("word_position", 2, _word_position)
     return connection
+
+
+def _optional_column(columns, column, default_sql="NULL"):
+    """Sélectionne une colonne enrichie ou une valeur compatible ancien schéma."""
+    if column in columns:
+        return column
+    return f"{default_sql} AS {column}"
+
+
+def _json_list(value):
+    """Décode une liste JSON persistée dans la base nettoyée."""
+    if value is None:
+        return []
+    items = json.loads(value)
+    if not isinstance(items, list):
+        raise ValueError("Les métadonnées JSON doivent être une liste.")
+    return items
 
 
 def _is_excluded_url(url):

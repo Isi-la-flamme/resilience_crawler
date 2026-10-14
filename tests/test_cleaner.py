@@ -140,6 +140,59 @@ class CleanerTests(unittest.TestCase):
         )
         self.assertEqual(site_counts, (2, 1))
 
+    def test_persists_page_metadata_and_heading_outline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "crawl.db"
+            output_path = Path(temp_dir) / "crawl-clean.db"
+            start_url = "https://example.org/"
+            page_url = "https://example.org/informations/actualites/article"
+            page_html = (
+                '<html lang="fr-BF"><head>'
+                '<meta name="description" content="Description institutionnelle">'
+                '<meta name="keywords" content="budget, santé; budget">'
+                '</head><body><nav><h2>Navigation</h2></nav>'
+                '<main><article><h1>Budget <em>national</em></h1>'
+                '<h2>Résultats annuels</h2><p>'
+                + "Contenu éditorial utile. " * 100
+                + "</p></article></main></body></html>"
+            )
+            with CrawlDatabase(source_path) as database:
+                database.save_page(start_url, {
+                    "url": page_url,
+                    "title": "Budget national",
+                    "published_at": "2026-01-01",
+                    "content": "Contenu éditorial utile. " * 100,
+                    "html": page_html,
+                    "crawler_name": "Test",
+                    "links": [],
+                    "images": [],
+                }, [])
+
+            clean_database(source_path, output_path)
+            cleaned = sqlite3.connect(output_path)
+            try:
+                result = cleaned.execute(
+                    """SELECT page_type, language, meta_description, meta_keywords_json,
+                              headings_json, word_count, cleaned_text
+                       FROM pages WHERE url=?""",
+                    (page_url,),
+                ).fetchone()
+            finally:
+                cleaned.close()
+
+        page_type, language, description, keywords, headings, word_count, text = result
+        self.assertEqual(page_type, "article")
+        self.assertEqual(language, "fr-bf")
+        self.assertEqual(description, "Description institutionnelle")
+        self.assertEqual(keywords, '["budget", "santé"]')
+        self.assertEqual(
+            headings,
+            '[{"level": 1, "text": "Budget national"}, '
+            '{"level": 2, "text": "Résultats annuels"}]',
+        )
+        self.assertEqual(word_count, len(text.split()))
+        self.assertNotIn("Navigation", headings)
+
     def test_refuses_to_overwrite_source_or_existing_destination(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source_path = Path(temp_dir) / "crawl.db"

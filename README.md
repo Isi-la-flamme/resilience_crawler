@@ -55,11 +55,11 @@ sites institutionnels
         ├── img/           images téléchargées
         └── documents/     documents téléchargés
               │
-              ├── cleaner.py ──────► crawl-clean.db
+              ├── cleaner.py ──────► clean_crawl.db
               ├── pdf_index.py ────► pdf-index.db
               └── cli.py --export-excel ─► crawl-export.xlsx
                                          
-crawl-clean.db + pdf-index.db
+clean_crawl.db + pdf-index.db
               │
               ▼
         api.py ──► tableau de bord et API locale
@@ -125,7 +125,7 @@ Les commandes suivantes sont à exécuter depuis la racine du projet.
    .\.venv\Scripts\python.exe cleaner.py
    ```
 
-   Par défaut, la commande lit `crawl.db` et crée `crawl-clean.db`.
+   Par défaut, la commande lit `crawl.db` et crée ou complète `clean_crawl.db`.
 
 3. **Créer l’index plein texte des PDF** :
 
@@ -301,7 +301,7 @@ la limite d’une cellule Excel est tronqué et signalé dans la colonne
 Choisir explicitement les bases source et sortie :
 
 ```powershell
-.\.venv\Scripts\python.exe cleaner.py --source-db .\crawl.db --output-db .\crawl-clean.db
+.\.venv\Scripts\python.exe cleaner.py --source-db .\crawl.db --output-db .\clean_crawl.db
 ```
 
 Le nettoyage retire notamment les éléments `head`, scripts, styles, navigation,
@@ -314,10 +314,18 @@ modifiée. Le texte destiné à la recherche est disponible dans la colonne
 `cleaned_text` de la base créée. Les blocs détectés et les statistiques par
 site sont conservés dans des tables dédiées ; `source_pages` compte les pages
 de la base d’origine et `cleaned_pages` les pages conservées après le filtre.
+La base préparée conserve aussi, quand elles existent, la langue et la
+description publiées dans le HTML, les mots-clés déclarés par la page, les
+titres structurants (`h1` à `h6`), un type de page déduit des segments d’URL
+et le nombre de mots du texte nettoyé. Ces champs sont des métadonnées de
+provenance, pas des résumés générés ; les mots-clés et descriptions absents
+restent vides. Si `clean_crawl.db` existe déjà, les nouvelles URL sont ajoutées
+sans écraser les pages existantes ; relancer le cleaner sur les mêmes URL
+n’ajoute pas de doublons. Pour remplacer volontairement toute la base, choisis
+un nouveau chemin de sortie ou retire explicitement l’ancienne base après
+vérification.
 
-Par sécurité, la sortie doit être différente de la source et ne doit pas déjà
-exister. Pour regénérer la base nettoyée, choisir un nouveau nom de sortie ou
-déplacer manuellement l’ancienne base après avoir vérifié le chemin.
+La sortie doit rester différente de la base source.
 
 ### Indexer et rechercher les PDF
 
@@ -362,7 +370,7 @@ Voir [API.md](./API.md) pour le guide API. Les paramètres suivants peuvent êtr
 définis dans PowerShell avant le démarrage :
 
 ```powershell
-$env:OPENDATA_PAGES_DB = "C:\data\crawl-clean.db"
+$env:OPENDATA_PAGES_DB = "C:\data\clean_crawl.db"
 $env:OPENDATA_PDF_DB = "C:\data\pdf-index.db"
 $env:OPENDATA_CRAWL_DB = "C:\data\crawl.db"
 $env:OPENDATA_IMAGES_DIR = "C:\data\img"
@@ -371,7 +379,7 @@ $env:OPENDATA_PORT = "8000"
 .\.venv\Scripts\python.exe api.py
 ```
 
-Si ces variables ne sont pas définies, l’API utilise `crawl-clean.db`,
+Si ces variables ne sont pas définies, l’API utilise `clean_crawl.db`,
 `pdf-index.db`, `crawl.db` et `img/` dans le dossier du projet. La galerie
 utilise uniquement les images téléchargées présentes dans `img/`, référencées
 par la base du crawler ; elle ne récupère jamais une image depuis son site
@@ -446,7 +454,7 @@ renvoient `422`.
 | `img/` | Images téléchargées pendant le crawl. |
 | `documents/` | Documents téléchargés pendant le crawl. |
 | `crawler.log.jsonl` | Journaux du crawler au format JSON Lines. |
-| `crawl-clean.db` | Texte des pages préparé et rapports de nettoyage. |
+| `clean_crawl.db` | Texte des pages préparé et rapports de nettoyage. |
 | `pdf-index.db` | Métadonnées, texte extrait et index de recherche plein texte PDF. |
 | `crawl-export.xlsx` | Classeur optionnel, créé avec `--export-excel`. |
 
@@ -524,7 +532,7 @@ pas à lui seul qu’un test a échoué.
 
 ### Le tableau de bord indique que les données sont indisponibles
 
-Vérifier que `crawl-clean.db` et `pdf-index.db` existent. Si nécessaire,
+Vérifier que `clean_crawl.db` et `pdf-index.db` existent. Si nécessaire,
 exécuter les commandes de nettoyage et d’indexation depuis une base `crawl.db`
 déjà alimentée. Vérifier également les valeurs de `OPENDATA_PAGES_DB` et
 `OPENDATA_PDF_DB` dans la session PowerShell courante.

@@ -141,6 +141,10 @@ class PublicApiTests(unittest.TestCase):
         self.assertIn("conditions de", dashboard.text)
         self.assertIn("réutilisation", dashboard.text)
         self.assertIn("appendHighlighted", dashboard.text)
+        self.assertIn("Structure de la page", dashboard.text)
+        self.assertIn("Mots-clés :", dashboard.text)
+        self.assertIn("performance.now()", dashboard.text)
+        self.assertIn("temps : ${elapsedSeconds} s", dashboard.text)
         self.assertIn("item.source_url || item.url", dashboard.text)
         self.assertIn("Lire le texte intégral", dashboard.text)
         self.assertIn("fetch(`/api/v1/${detailKind}/${item.id}`)", dashboard.text)
@@ -205,6 +209,46 @@ class PublicApiTests(unittest.TestCase):
             "https://example.org/budget",
         )
         self.assertEqual(pages.json()["items"][0]["rights_status"], "not_assessed")
+        self.assertEqual(pages.json()["items"][0]["page_type"], "page")
+        self.assertEqual(pages.json()["items"][0]["headings"], [])
+        self.assertIsNone(pages.json()["items"][0]["word_count"])
+
+    def test_page_api_exposes_metadata_when_clean_database_has_it(self):
+        pages = sqlite3.connect(self.pages_database)
+        pages.executescript("""
+            ALTER TABLE pages ADD COLUMN page_type TEXT;
+            ALTER TABLE pages ADD COLUMN language TEXT;
+            ALTER TABLE pages ADD COLUMN meta_description TEXT;
+            ALTER TABLE pages ADD COLUMN meta_keywords_json TEXT;
+            ALTER TABLE pages ADD COLUMN headings_json TEXT;
+            ALTER TABLE pages ADD COLUMN word_count INTEGER;
+        """)
+        pages.execute(
+            """UPDATE pages SET page_type=?, language=?, meta_description=?,
+                      meta_keywords_json=?, headings_json=?, word_count=? WHERE id=1""",
+            (
+                "article",
+                "fr",
+                "Présentation du budget.",
+                '["budget", "finances"]',
+                '[{"level": 1, "text": "Budget 2026"}]',
+                42,
+            ),
+        )
+        pages.commit()
+        pages.close()
+
+        result = self.client.get(
+            "/api/v1/pages?site=example.org&q=budget"
+        ).json()["items"][0]
+        detail = self.client.get("/api/v1/pages/1").json()
+
+        self.assertEqual(result["page_type"], "article")
+        self.assertEqual(result["language"], "fr")
+        self.assertEqual(result["description"], "Présentation du budget.")
+        self.assertEqual(result["keywords"], ["budget", "finances"])
+        self.assertEqual(result["word_count"], 42)
+        self.assertEqual(detail["headings"], [{"level": 1, "text": "Budget 2026"}])
 
     def test_search_can_match_a_substring_or_a_whole_word(self):
         pages = sqlite3.connect(self.pages_database)
