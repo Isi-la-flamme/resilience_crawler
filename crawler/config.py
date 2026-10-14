@@ -1,5 +1,7 @@
 import json
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -82,7 +84,7 @@ def load_config(path=DEFAULT_CONFIG_PATH):
 
     config.setdefault("documents_dir", "documents")
 
-    for key in ("database_file", "images_dir", "documents_dir", "log_file"):
+    for key in ("images_dir", "documents_dir", "log_file"):
         value = config.get(key)
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{key} doit être un chemin non vide.")
@@ -97,8 +99,36 @@ def load_config(path=DEFAULT_CONFIG_PATH):
     if not isinstance(crawler_name, str) or not crawler_name.strip():
         raise ValueError("crawler_name doit être un nom non vide.")
     config["crawler_name"] = crawler_name.strip()
+    config["database_file"] = database_filename_for_urls(start_urls)
     config["database_path"] = config_path.resolve().parent / config["database_file"]
     config["images_path"] = config_path.resolve().parent / config["images_dir"]
     config["documents_path"] = config_path.resolve().parent / config["documents_dir"]
     config["log_path"] = config_path.resolve().parent / config["log_file"]
     return config
+
+
+def database_filename_for_urls(start_urls):
+    """Construit un nom stable depuis les ministères des URL de départ."""
+    ministries = set()
+    for url in start_urls:
+        try:
+            hostname = urlsplit(url).hostname
+        except ValueError as error:
+            raise ValueError(f"URL de départ invalide : {url}") from error
+        if not hostname:
+            raise ValueError(f"URL de départ sans hôte valide : {url}")
+
+        hostname = hostname.rstrip(".").lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        labels = hostname.split(".")
+        if len(labels) >= 3 and labels[-2:] == ["gov", "bf"]:
+            ministry = "-".join(labels[:-2])
+        else:
+            ministry = "-".join(labels)
+        ministry = re.sub(r"[^a-z0-9-]+", "-", ministry).strip("-")
+        if not ministry:
+            raise ValueError(f"Impossible de déduire le ministère depuis : {url}")
+        ministries.add(ministry)
+
+    return f"crawl_{'-'.join(sorted(ministries))}.db"

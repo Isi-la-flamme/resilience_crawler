@@ -51,7 +51,7 @@ sites institutionnels
         │
         ▼
    cli.py / crawler
-        ├── crawl.db       pages, file d’URL, images et documents
+        ├── crawl_<ministere>.db  pages, file d’URL, images et documents
         ├── img/           images téléchargées
         └── documents/     documents téléchargés
               │
@@ -115,9 +115,12 @@ Les commandes suivantes sont à exécuter depuis la racine du projet.
    .\.venv\Scripts\python.exe cli.py --config --no-images
    ```
 
-   Le crawler crée ou réutilise `crawl.db`, `img/`, `documents/` et
-   `crawler.log.jsonl`. Sans `--config`, la commande ne démarre pas de nouveaux
-   sites : elle ne reprend que les sites ayant une file en attente dans SQLite.
+   Le crawler déduit automatiquement le nom de la base des hôtes des URL de
+   départ (actuellement `crawl_agriculture.db`), puis crée ou réutilise cette
+   base, ainsi que `img/`, `documents/` et `crawler.log.jsonl`. Des URL
+   positionnelles produisent une base correspondant à leurs hôtes. Sans
+   `--config`, la commande ne démarre pas de nouveaux sites : elle ne reprend
+   que les sites ayant une file en attente dans SQLite.
 
 2. **Préparer le texte des pages** :
 
@@ -125,7 +128,8 @@ Les commandes suivantes sont à exécuter depuis la racine du projet.
    .\.venv\Scripts\python.exe cleaner.py
    ```
 
-   Par défaut, la commande lit `crawl.db` et crée ou complète `clean_crawl.db`.
+   Par défaut, la commande lit `crawl_agriculture.db` et crée ou complète
+   `clean_crawl.db`.
 
 3. **Créer l’index plein texte des PDF** :
 
@@ -133,8 +137,9 @@ Les commandes suivantes sont à exécuter depuis la racine du projet.
    .\.venv\Scripts\python.exe pdf_index.py index
    ```
 
-   Par défaut, la commande lit les documents référencés dans `crawl.db`, extrait
-   le texte des PDF téléchargés et crée `pdf-index.db`.
+   Par défaut, la commande lit les documents référencés dans
+   `crawl_agriculture.db`, extrait le texte des PDF téléchargés et crée
+   `pdf-index.db`.
 
 4. **Démarrer le portail local** :
 
@@ -167,7 +172,7 @@ de configuration.
 | `timeout` | `30` | Délai d’attente réseau, en secondes. |
 | `retries` | `2` | Nombre de reprises après la tentative initiale. |
 | `max_response_bytes` | `52428800` | Taille maximale d’une réponse, en octets (50 Mio). |
-| `database_file` | `crawl.db` | Base SQLite de collecte. |
+| `database_file` | Calculée automatiquement | Nom `crawl_<ministere>.db` déduit des hôtes de `start_urls` ; les domaines `.gov.bf` utilisent le nom du ministère, les autres gardent leur hôte complet pour éviter les collisions. Ce n’est pas une option à définir dans le fichier. |
 | `database_flush_interval` | `30` | Intervalle de sauvegarde de la base, en secondes. |
 | `images_dir` | `img` | Dossier des images téléchargées. |
 | `documents_dir` | `documents` | Dossier des documents téléchargés. |
@@ -256,8 +261,9 @@ Fournir une ou plusieurs URL de départ pour ce lancement seulement :
 ```
 
 Les URL fournies remplacent les `start_urls` de la configuration pour cette
-exécution. Le crawler reprend les files existantes pour ces sites ; si aucune
-URL n’y est en attente, il ajoute les URL données comme points de départ.
+exécution, et leur hôte détermine le nom de la base utilisée. Le crawler
+reprend les files existantes pour ces sites ; si aucune URL n’y est en attente,
+il ajoute les URL données comme points de départ.
 
 Utiliser une autre configuration ou modifier les paramètres pour ce lancement
 seulement :
@@ -301,7 +307,7 @@ la limite d’une cellule Excel est tronqué et signalé dans la colonne
 Choisir explicitement les bases source et sortie :
 
 ```powershell
-.\.venv\Scripts\python.exe cleaner.py --source-db .\crawl.db --output-db .\clean_crawl.db
+.\.venv\Scripts\python.exe cleaner.py --source-db .\crawl_agriculture.db --output-db .\clean_crawl.db
 ```
 
 Le nettoyage retire notamment les éléments `head`, scripts, styles, navigation,
@@ -338,7 +344,7 @@ Créer un index (la base de sortie ne doit pas déjà exister) :
 Personnaliser les chemins :
 
 ```powershell
-.\.venv\Scripts\python.exe pdf_index.py index --source-db .\crawl.db --index-db .\pdf-index.db
+.\.venv\Scripts\python.exe pdf_index.py index --source-db .\crawl_agriculture.db --index-db .\pdf-index.db
 ```
 
 Rechercher une expression :
@@ -372,7 +378,7 @@ définis dans PowerShell avant le démarrage :
 ```powershell
 $env:OPENDATA_PAGES_DB = "C:\data\clean_crawl.db"
 $env:OPENDATA_PDF_DB = "C:\data\pdf-index.db"
-$env:OPENDATA_CRAWL_DB = "C:\data\crawl.db"
+$env:OPENDATA_CRAWL_DB = "C:\data\crawl_agriculture.db"
 $env:OPENDATA_IMAGES_DIR = "C:\data\img"
 $env:OPENDATA_HOST = "127.0.0.1"
 $env:OPENDATA_PORT = "8000"
@@ -380,7 +386,7 @@ $env:OPENDATA_PORT = "8000"
 ```
 
 Si ces variables ne sont pas définies, l’API utilise `clean_crawl.db`,
-`pdf-index.db`, `crawl.db` et `img/` dans le dossier du projet. La galerie
+`pdf-index.db`, `crawl_agriculture.db` et `img/` dans le dossier du projet. La galerie
 utilise uniquement les images téléchargées présentes dans `img/`, référencées
 par la base du crawler ; elle ne récupère jamais une image depuis son site
 d’origine. Pour supprimer les variables de la session PowerShell :
@@ -449,8 +455,8 @@ renvoient `422`.
 
 | Chemin par défaut | Rôle |
 | --- | --- |
-| `crawl.db` | Base source : file d’URL, pages collectées, images et documents. |
-| `crawl.db-wal`, `crawl.db-shm` | Fichiers SQLite temporaires possibles pendant l’utilisation de la base. |
+| `crawl_<ministere>.db` | Base source par ministère : file d’URL, pages collectées, images et documents (ex. `crawl_agriculture.db`). |
+| `crawl_<ministere>.db-wal`, `crawl_<ministere>.db-shm` | Fichiers SQLite temporaires possibles pendant l’utilisation de la base. |
 | `img/` | Images téléchargées pendant le crawl. |
 | `documents/` | Documents téléchargés pendant le crawl. |
 | `crawler.log.jsonl` | Journaux du crawler au format JSON Lines. |
@@ -534,8 +540,9 @@ pas à lui seul qu’un test a échoué.
 ### Le tableau de bord indique que les données sont indisponibles
 
 Vérifier que `clean_crawl.db` et `pdf-index.db` existent. Si nécessaire,
-exécuter les commandes de nettoyage et d’indexation depuis une base `crawl.db`
-déjà alimentée. Vérifier également les valeurs de `OPENDATA_PAGES_DB` et
+exécuter les commandes de nettoyage et d’indexation depuis une base
+`crawl_<ministere>.db` déjà alimentée (actuellement `crawl_agriculture.db`).
+Vérifier également les valeurs de `OPENDATA_PAGES_DB` et
 `OPENDATA_PDF_DB` dans la session PowerShell courante.
 
 ### Le cleaner ou l’indexeur indique que la sortie existe déjà

@@ -220,11 +220,49 @@ class CliTests(unittest.TestCase):
                 ])
 
         export.assert_called_once_with(
-            config_path.parent / "crawl.db",
+            config_path.parent / "crawl_example-org.db",
             config_path.parent / "export.xlsx",
         )
         crawler_class.assert_not_called()
         self.assertIn("10 pages, 5 images, 2 documents", output.getvalue())
+
+    def test_positional_urls_select_a_database_named_for_their_host(self):
+        config = {
+            "start_urls": ["https://configured.example/"],
+            "max_pages": 25,
+            "workers": 2,
+            "delay": 0,
+            "timeout": 5,
+            "retries": 1,
+            "max_response_bytes": 1024,
+            "database_path": Path("crawl_configured.db"),
+            "images_path": Path("img"),
+            "documents_path": Path("documents"),
+            "log_path": Path("crawler.jsonl"),
+            "crawler_name": "Test",
+            "database_flush_interval": 30,
+            "image_batch_size": 1,
+        }
+        with (
+            patch("cli.load_config", return_value=config),
+            patch("cli.configure_logging", return_value=[]),
+            patch("cli.CrawlDatabase") as database_class,
+            patch("cli.Crawler") as crawler_class,
+        ):
+            database = database_class.return_value.__enter__.return_value
+            database.queued_start_urls.return_value = []
+            database.ensure_start_url_queued.return_value = 0
+            database.summary.return_value = {
+                "pages": 0,
+                "images": 0,
+                "documents": 0,
+            }
+            crawler_class.crawl_many.return_value = [{"pages": []}]
+
+            cli.main(["https://finance.gov.bf/"])
+
+        database_class.assert_called_once_with(Path("crawl_finance.db"))
+        crawler_class.crawl_many.assert_called_once()
 
     def test_runtime_options_override_config_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:

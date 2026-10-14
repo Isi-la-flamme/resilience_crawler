@@ -20,6 +20,11 @@ crawl-export.xlsx
 crawl-results.jsonl
 crawler.log.jsonl
 
+*.db
+
+crawl_*.db-shm
+crawl_*.db-wal
+
 clean_crawl.db
 communication-clean.db
 .vscode/

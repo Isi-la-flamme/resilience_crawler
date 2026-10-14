@@ -15,7 +15,11 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 from crawler import Crawler, CrawlDatabase
-from crawler.config import DEFAULT_CONFIG_PATH, load_config
+from crawler.config import (
+    DEFAULT_CONFIG_PATH,
+    database_filename_for_urls,
+    load_config,
+)
 from crawler.excel_export import export_database_to_excel
 from crawler.logging_setup import configure_logging
 
@@ -181,6 +185,12 @@ def main(argv=None):
                 f"{counts['documents']} documents)."
             )
             return
+
+        if args.start_urls:
+            config["database_file"] = database_filename_for_urls(args.start_urls)
+            config["database_path"] = (
+                config["database_path"].parent / config["database_file"]
+            )
 
         if args.no_html and args.no_images and args.no_documents:
             cli.error(

@@ -3,10 +3,11 @@ import logging
 from pathlib import Path
 
 from crawler.pdf_index import build_pdf_index, search_pdf_index
+from crawler.config import DEFAULT_CONFIG_PATH, load_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_SOURCE_DATABASE = PROJECT_ROOT / "crawl.db"
+DEFAULT_SOURCE_DATABASE = load_config(DEFAULT_CONFIG_PATH)["database_path"]
 DEFAULT_INDEX_DATABASE = PROJECT_ROOT / "pdf-index.db"
 
 
@@ -21,7 +22,7 @@ def main(argv=None):
         "--source-db",
         type=Path,
         default=DEFAULT_SOURCE_DATABASE,
-        help="Base SQLite source (défaut : crawl.db)",
+        help=f"Base SQLite source (défaut : {DEFAULT_SOURCE_DATABASE.name})",
     )
     index_parser.add_argument(
         "--index-db",

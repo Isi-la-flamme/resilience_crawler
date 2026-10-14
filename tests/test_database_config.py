@@ -7,7 +7,7 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 
-from crawler.config import load_config
+from crawler.config import database_filename_for_urls, load_config
 from crawler.config import DEFAULT_CONFIG_PATH
 from crawler.database import CrawlDatabase
 from crawler.json_logging import JsonLineFormatter
@@ -23,21 +23,22 @@ class DatabaseConfigTests(unittest.TestCase):
         config = load_config(DEFAULT_CONFIG_PATH)
         self.assertIn("start_urls", config)
         self.assertTrue(config["start_urls"])
+        self.assertEqual(config["database_file"], "crawl_agriculture.db")
         self.assertEqual(config["database_path"], DEFAULT_CONFIG_PATH.parent / config["database_file"])
+        self.assertNotIn("database_file:", DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
 
     def test_loads_yaml_configuration_and_resolves_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.yaml"
             config_path.write_text(
                 "start_urls:\n"
-                "  - https://example.org/\n"
+                "  - https://ministere.gov.bf/\n"
                 "max_pages: 12\n"
                 "workers: 2\n"
                 "delay: 0.5\n"
                 "timeout: 10\n"
                 "retries: 1\n"
                 "max_response_bytes: 2048\n"
-                "database_file: crawl.db\n"
                 "images_dir: img\n"
                 "documents_dir: documents\n"
                 "log_file: crawler.jsonl\n",
@@ -46,9 +47,10 @@ class DatabaseConfigTests(unittest.TestCase):
 
             config = load_config(config_path)
 
-        self.assertEqual(config["start_urls"], ["https://example.org/"])
+        self.assertEqual(config["start_urls"], ["https://ministere.gov.bf/"])
         self.assertEqual(config["max_pages"], 12)
-        self.assertEqual(config["database_path"], config_path.parent / "crawl.db")
+        self.assertEqual(config["database_file"], "crawl_ministere.db")
+        self.assertEqual(config["database_path"], config_path.parent / "crawl_ministere.db")
 
     def test_loads_workers_and_resolves_paths_relative_to_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -62,7 +64,7 @@ class DatabaseConfigTests(unittest.TestCase):
                 "timeout": 5,
                 "retries": 1,
                 "max_response_bytes": 1024,
-                "database_file": "crawl.db",
+                "database_file": "custom-name.db",
                 "images_dir": "img",
                 "log_file": "crawler.jsonl",
             }), encoding="utf-8")
@@ -74,7 +76,11 @@ class DatabaseConfigTests(unittest.TestCase):
         self.assertEqual(config["crawler_name"], "Yennenga Crawl")
         self.assertEqual(config["database_flush_interval"], 30)
         self.assertEqual(config["documents_path"], config_path.parent / "documents")
-        self.assertEqual(config["database_path"], config_path.parent / "crawl.db")
+        self.assertEqual(config["database_file"], "crawl_example-com-example-org.db")
+        self.assertEqual(
+            config["database_path"],
+            config_path.parent / "crawl_example-com-example-org.db",
+        )
         self.assertEqual(config["images_path"], config_path.parent / "img")
         self.assertEqual(config["log_path"], config_path.parent / "crawler.jsonl")
 
@@ -85,6 +91,29 @@ class DatabaseConfigTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "start_urls"):
                 load_config(config_path)
+
+    def test_database_filename_is_stable_for_domains_and_multiple_ministries(self):
+        self.assertEqual(
+            database_filename_for_urls([
+                "https://www.agriculture.gov.bf/accueil",
+                "https://agriculture.gov.bf/le-ministere",
+            ]),
+            "crawl_agriculture.db",
+        )
+        self.assertEqual(
+            database_filename_for_urls([
+                "https://www.finance.gov.bf/",
+                "https://www.agriculture.gov.bf/",
+            ]),
+            "crawl_agriculture-finance.db",
+        )
+        self.assertEqual(
+            database_filename_for_urls([
+                "https://example.org/",
+                "https://example.com/",
+            ]),
+            "crawl_example-com-example-org.db",
+        )
 
     def test_queue_deduplicates_and_persists_page_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:

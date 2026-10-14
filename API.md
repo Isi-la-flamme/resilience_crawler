@@ -16,8 +16,9 @@ Install dependencies, then start the server bound to localhost:
 
 Open <http://127.0.0.1:8000/> for the dashboard or
 <http://127.0.0.1:8000/docs> for interactive API documentation. The service
-defaults to `clean_crawl.db`, `pdf-index.db`, `crawl.db`, and `img/` in the
-project directory. Override those paths with `OPENDATA_PAGES_DB`,
+defaults to `clean_crawl.db`, `pdf-index.db`, the crawl database derived from
+the configured `start_urls` (currently `crawl_agriculture.db`), and `img/` in
+the project directory. Override those paths with `OPENDATA_PAGES_DB`,
 `OPENDATA_PDF_DB`, `OPENDATA_CRAWL_DB`, and `OPENDATA_IMAGES_DIR`.
 `OPENDATA_HOST` defaults to `127.0.0.1`; do not expose this prototype directly
 to the public internet.

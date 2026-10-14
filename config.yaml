@@ -1,5 +1,5 @@
 start_urls:
-  - https://www.communication.gov.bf/accueil
+  - https://www.agriculture.gov.bf/accueil
 
    
 max_pages: 10000
@@ -9,7 +9,6 @@ image_batch_size: 1
 timeout: 30
 retries: 2
 max_response_bytes: 52428800
-database_file: crawl.db
 database_flush_interval: 30
 images_dir: img
 documents_dir: documents

@@ -3,9 +3,11 @@ import logging
 from pathlib import Path
 
 from crawler.cleaner import clean_database
+from crawler.config import DEFAULT_CONFIG_PATH, load_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_SOURCE_DATABASE = load_config(DEFAULT_CONFIG_PATH)["database_path"]
 
 
 def main(argv=None):
@@ -19,8 +21,8 @@ def main(argv=None):
     parser.add_argument(
         "--source-db",
         type=Path,
-        default=PROJECT_ROOT / "crawl.db",
-        help="Base SQLite d’origine (défaut : crawl.db)",
+        default=DEFAULT_SOURCE_DATABASE,
+        help=f"Base SQLite d’origine (défaut : {DEFAULT_SOURCE_DATABASE.name})",
     )
     parser.add_argument(
         "--output-db",

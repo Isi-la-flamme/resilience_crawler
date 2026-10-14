@@ -14,12 +14,13 @@ from crawler.public_api import (
     list_sites,
     resolve_image_file,
 )
+from crawler.config import DEFAULT_CONFIG_PATH, load_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+DEFAULT_CRAWL_DATABASE = load_config(DEFAULT_CONFIG_PATH)["database_path"]
 DEFAULT_PAGES_DATABASE = PROJECT_ROOT / "clean_crawl.db"
 DEFAULT_PDF_DATABASE = PROJECT_ROOT / "pdf-index.db"
-DEFAULT_CRAWL_DATABASE = PROJECT_ROOT / "crawl.db"
 DEFAULT_IMAGES_DIRECTORY = PROJECT_ROOT / "img"
 
 DASHBOARD = """<!doctype html>
